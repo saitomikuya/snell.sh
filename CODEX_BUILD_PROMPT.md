@@ -32,7 +32,7 @@
 - 提供 panelctl reset-password password。
 
 必须实现的默认部署：
-- 面板默认监听 127.0.0.1:8080。
+- 面板默认监听 0.0.0.0:8080，Docker 部署后可直接通过服务器 IP 访问；文档必须提示只向可信 IP 放行管理端口并立即改密。
 - Snell v5 默认监听 127.0.0.1:6160，随机 PSK。
 - ShadowTLS v3 默认监听 0.0.0.0:8443/tcp，转发到 Snell，默认 SNI 为 www.microsoft.com，随机密码。
 - 自动创建一个 SS-2022 TCP+UDP 节点，使用 2022-blake3-aes-128-gcm 和合规随机 Base64 密钥。

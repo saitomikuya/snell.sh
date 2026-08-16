@@ -97,7 +97,7 @@ func runServer() error {
 	errChannel := make(chan error, 1)
 	go func() {
 		log.Printf("Proxy Panel %s listening on http://%s", version, cfg.Address())
-		log.Printf("首次安装默认密码为 password，登录后必须立即修改；公网监听必须配置 HTTPS")
+		log.Printf("首次安装默认密码为 password，登录后必须立即修改；请仅向可信 IP 放行管理端口，长期使用建议配置 HTTPS")
 		errChannel <- server.ListenAndServe()
 	}()
 	sig := make(chan os.Signal, 1)

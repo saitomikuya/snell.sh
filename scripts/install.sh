@@ -15,7 +15,7 @@ if [ ! -f "$BASE_DIR/.env" ]; then
   umask 077
   {
     echo "PROXY_PANEL_IMAGE=$IMAGE"
-    echo "PANEL_BIND=${PANEL_BIND:-127.0.0.1}"
+    echo "PANEL_BIND=${PANEL_BIND:-0.0.0.0}"
     echo "PANEL_PORT=${PANEL_PORT:-8080}"
     echo "PANEL_SECURE_COOKIE=${PANEL_SECURE_COOKIE:-0}"
     echo "TZ=${TZ:-Asia/Shanghai}"
@@ -36,7 +36,14 @@ while [ "$attempt" -lt 60 ]; do
   attempt=$((attempt+1)); sleep 2
 done
 [ "${status:-}" = healthy ] || { echo "容器未在超时时间内健康启动" >&2; exit 1; }
-port=${PANEL_PORT:-8080}
-echo "安装完成：http://127.0.0.1:$port"
+port=$(sed -n 's/^PANEL_PORT=//p' "$BASE_DIR/.env" | tail -n 1)
+bind=$(sed -n 's/^PANEL_BIND=//p' "$BASE_DIR/.env" | tail -n 1)
+port=${port:-8080}
+if [ "$bind" = "127.0.0.1" ] || [ "$bind" = "::1" ] || [ "$bind" = "localhost" ]; then
+  echo "安装完成，但检测到已有本机监听配置：http://127.0.0.1:$port"
+  echo "如需直接访问，请将 $BASE_DIR/.env 中 PANEL_BIND 改为 0.0.0.0 后重新运行 docker compose up -d"
+else
+  echo "安装完成：http://你的服务器IP:$port"
+fi
 echo "默认密码：password（首次登录必须修改）"
-echo "远程访问建议：ssh -L ${port}:127.0.0.1:${port} root@你的服务器"
+echo "请在云安全组/防火墙中仅向可信 IP 放行 TCP $port，并尽快配置 HTTPS"

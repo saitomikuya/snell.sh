@@ -18,7 +18,7 @@ type Config struct {
 }
 
 func Load() (Config, error) {
-	c := Config{DataDir: env("PANEL_DATA_DIR", "/data"), Bind: env("PANEL_BIND", "127.0.0.1"), Port: 8080, UID: envInt("PANEL_UID", 10001), GID: envInt("PANEL_GID", 10001)}
+	c := Config{DataDir: env("PANEL_DATA_DIR", "/data"), Bind: env("PANEL_BIND", "0.0.0.0"), Port: 8080, UID: envInt("PANEL_UID", 10001), GID: envInt("PANEL_GID", 10001)}
 	if raw := os.Getenv("PANEL_PORT"); raw != "" {
 		port, err := strconv.Atoi(raw)
 		if err != nil || port < 1 || port > 65535 {

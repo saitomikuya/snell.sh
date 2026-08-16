@@ -10,7 +10,7 @@ services:
     volumes:
       - /opt/proxy-panel:/data
     environment:
-      PANEL_BIND: ${PANEL_BIND:-127.0.0.1}
+      PANEL_BIND: ${PANEL_BIND:-0.0.0.0}
       PANEL_PORT: ${PANEL_PORT:-8080}
       PANEL_SECURE_COOKIE: ${PANEL_SECURE_COOKIE:-0}
       PANEL_AUTO_INSTALL_RUNTIMES: ${PANEL_AUTO_INSTALL_RUNTIMES:-1}

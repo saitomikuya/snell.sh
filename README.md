@@ -9,16 +9,10 @@ Proxy Panel 是面向 Debian/Ubuntu VPS 的单容器中文代理管理面板。�
 Docker Hub 镜像 `saitomikuya/proxy-panel:latest` 同时支持 `linux/amd64` 和 `linux/arm64`。已经安装 Docker 的 Debian/Ubuntu VPS 可直接执行：
 
 ```bash
-sudo docker run -d --name proxy-panel --pull=always --restart unless-stopped --network host --cap-add NET_ADMIN --cap-add NET_RAW -v /opt/proxy-panel:/data -e PANEL_BIND=127.0.0.1 -e PANEL_PORT=8080 -e TZ=Asia/Shanghai saitomikuya/proxy-panel:latest
+sudo docker run -d --name proxy-panel --pull=always --restart unless-stopped --network host --cap-add NET_ADMIN --cap-add NET_RAW -v /opt/proxy-panel:/data -e PANEL_BIND=0.0.0.0 -e PANEL_PORT=8080 -e TZ=Asia/Shanghai saitomikuya/proxy-panel:latest
 ```
 
-在自己的电脑建立 SSH 隧道：
-
-```bash
-ssh -L 8080:127.0.0.1:8080 root@你的服务器地址
-```
-
-然后打开 <http://127.0.0.1:8080>，使用默认密码 `password` 登录并按提示立即改密。公网端口、安全组、HTTPS 反代和面板操作请继续阅读[完整使用说明](./docs/USER_GUIDE.md)。
+部署完成后直接打开 `http://你的服务器IP:8080`，使用默认密码 `password` 登录并按提示立即改密，不再需要先建立 SSH 隧道。请在云安全组或防火墙中仅向可信 IP 放行 `8080/tcp`；长期使用建议配置 HTTPS。详细设置和面板操作请继续阅读[完整使用说明](./docs/USER_GUIDE.md)。
 
 ## 使用入口
 
@@ -47,7 +41,7 @@ ssh -L 8080:127.0.0.1:8080 root@你的服务器地址
 - nftables 公网端口字节采样、按节点周期累计、流量限额、手动/自动暂停恢复；只操作 `inet proxy_panel` 专属表。
 - 节点运行时输出与中文启停、重启、流量活动和限额行为日志。
 - SQLite 一致性备份、哈希校验、路径穿越防护、恢复前自动备份、在线恢复和 Session 注销。
-- 中文桌面/手机面板：仪表盘、节点、流量、上游版本对比与一键更新、备份、中文行为审计和安全设置。
+- 中文桌面/手机面板：仪表盘、节点、流量、上游版本对比与一键更新、备份、中文行为审计、安全设置，以及可持久化切换的白天/黑夜模式。
 - 单容器多进程监督、非 root Web、root Agent、host 网络示例、NET_ADMIN/NET_RAW、健康检查。
 - 幂等安装、镜像更新回滚和默认保留数据的卸载脚本。
 
@@ -104,6 +98,7 @@ export PANEL_AUTO_INSTALL_RUNTIMES=0
 ```bash
 export PANEL_DATA_DIR="$PWD/.dev-data"
 export PANEL_AUTO_INSTALL_RUNTIMES=0
+export PANEL_BIND=127.0.0.1
 ./bin/panel server
 ```
 
@@ -123,9 +118,9 @@ Compose 示例具备以下边界：
 - 不使用 `--privileged`
 - 不挂载 Docker Socket
 - 只把 `/opt/proxy-panel` 挂载为 `/data`
-- 面板默认绑定 `127.0.0.1:8080`
+- 面板默认绑定 `0.0.0.0:8080`，部署后可直接通过服务器 IP 访问
 
-如果设置 `PANEL_BIND=0.0.0.0`，必须先部署可信 HTTPS 反向代理，并设置 `PANEL_SECURE_COOKIE=1`。
+请在云安全组或宿主机防火墙中只向可信来源开放 `8080/tcp`。配置 HTTPS 反向代理时，建议把 `PANEL_BIND` 改为 `127.0.0.1`，并设置 `PANEL_SECURE_COOKIE=1`。
 
 ## VPS 安装
 

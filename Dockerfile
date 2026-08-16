@@ -26,7 +26,7 @@ RUN ln -s /usr/local/bin/panel /usr/local/bin/panelctl
 COPY packaging/docker/entrypoint.sh /usr/local/bin/container-entrypoint
 COPY packaging/s6/ /etc/s6/
 RUN chmod 0755 /usr/local/bin/container-entrypoint /etc/s6/panel-agent/run /etc/s6/panel-web/run
-ENV PANEL_DATA_DIR=/data PANEL_BIND=127.0.0.1 PANEL_PORT=8080 PANEL_UID=10001 PANEL_GID=10001 TZ=Asia/Shanghai
+ENV PANEL_DATA_DIR=/data PANEL_BIND=0.0.0.0 PANEL_PORT=8080 PANEL_UID=10001 PANEL_GID=10001 TZ=Asia/Shanghai
 VOLUME ["/data"]
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=30s CMD ["/usr/local/bin/panel", "healthcheck"]

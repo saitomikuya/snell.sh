@@ -15,7 +15,8 @@
 - 节点启停、重启、日志和客户端配置；
 - 公网端口流量统计、月限额、暂停和恢复；
 - 上游版本检查、受控运行时更新、配置备份和恢复；
-- 中文行为审计和管理员密码管理。
+- 中文行为审计和管理员密码管理；
+- 可持久化记忆选择的白天/黑夜界面模式。
 
 当前限制：
 
@@ -72,7 +73,7 @@ sudo ufw allow 20000/tcp
 sudo ufw allow 20000/udp
 ```
 
-如果只通过 SSH 隧道访问面板，不需要在安全组中放行 `8080`。
+面板默认监听 `0.0.0.0:8080`。为便于直接访问，请向你自己的可信公网 IP 放行 `8080/tcp`，不要对整个互联网无限制开放管理端口。如果选择 SSH 隧道访问，则不需要放行 `8080`。
 
 ## 3. 安装
 
@@ -81,10 +82,10 @@ sudo ufw allow 20000/udp
 镜像 `saitomikuya/proxy-panel:latest` 同时发布 `linux/amd64` 和 `linux/arm64`。已经安装 Docker 的 VPS 直接执行：
 
 ```bash
-sudo docker run -d --name proxy-panel --pull=always --restart unless-stopped --network host --cap-add NET_ADMIN --cap-add NET_RAW -v /opt/proxy-panel:/data -e PANEL_BIND=127.0.0.1 -e PANEL_PORT=8080 -e TZ=Asia/Shanghai saitomikuya/proxy-panel:latest
+sudo docker run -d --name proxy-panel --pull=always --restart unless-stopped --network host --cap-add NET_ADMIN --cap-add NET_RAW -v /opt/proxy-panel:/data -e PANEL_BIND=0.0.0.0 -e PANEL_PORT=8080 -e TZ=Asia/Shanghai saitomikuya/proxy-panel:latest
 ```
 
-Docker 会自动拉取匹配当前 CPU 架构的镜像，持久化数据保存在 `/opt/proxy-panel`。随后按第 4 节通过 SSH 隧道访问面板。
+Docker 会自动拉取匹配当前 CPU 架构的镜像，持久化数据保存在 `/opt/proxy-panel`。容器健康后直接打开 `http://你的服务器IP:8080`。
 
 ### 3.2 从源码构建并直接启动
 
@@ -139,7 +140,7 @@ sudo ./scripts/install.sh
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `PROXY_PANEL_IMAGE` | `saitomikuya/proxy-panel:latest` | 要运行的面板镜像 |
-| `PANEL_BIND` | `127.0.0.1` | 面板监听地址 |
+| `PANEL_BIND` | `0.0.0.0` | 面板监听地址；改为 `127.0.0.1` 可限制为本机访问 |
 | `PANEL_PORT` | `8080` | 面板监听端口 |
 | `PANEL_SECURE_COOKIE` | `0` | HTTPS 反代时设为 `1` |
 | `PANEL_AUTO_INSTALL_RUNTIMES` | `1` | 首次启动自动下载固定版本运行时；设为 `0` 可关闭 |
@@ -147,19 +148,19 @@ sudo ./scripts/install.sh
 
 ## 4. 第一次访问和改密
 
-### 4.1 方式 A：SSH 隧道（最安全、最省事）
+### 4.1 直接通过服务器 IP 访问（默认）
 
-在自己的电脑上执行：
+确认云安全组或宿主机防火墙已仅向你的可信公网 IP 放行 `8080/tcp`，然后在浏览器打开：
 
-```bash
-ssh -L 8080:127.0.0.1:8080 root@你的服务器地址
+```text
+http://你的服务器IP:8080
 ```
 
-保持终端连接，然后打开 <http://127.0.0.1:8080>。
+此方式无需 SSH 隧道。首次进入立即完成第 4.4 节的改密操作；长期使用建议升级为 HTTPS。
 
-### 4.2 方式 B：HTTPS 反向代理
+### 4.2 HTTPS 反向代理（推荐长期使用）
 
-保持 `PANEL_BIND=127.0.0.1`，在宿主机使用 Caddy、Nginx 等反向代理到 `127.0.0.1:8080`。例如 Caddy：
+把 `PANEL_BIND` 改为 `127.0.0.1`，在宿主机使用 Caddy、Nginx 等反向代理到 `127.0.0.1:8080`。例如 Caddy：
 
 ```caddyfile
 panel.example.com {
@@ -182,9 +183,17 @@ cd /opt/proxy-panel
 sudo docker compose up -d
 ```
 
-不要在没有 HTTPS 保护的情况下把 `PANEL_BIND` 改成 `0.0.0.0` 并直接暴露到公网。
+### 4.3 SSH 隧道（可选）
 
-### 4.3 首次登录
+如果不希望开放 `8080/tcp`，先把 `PANEL_BIND` 改为 `127.0.0.1` 并重建容器，再在自己的电脑上执行：
+
+```bash
+ssh -L 8080:127.0.0.1:8080 root@你的服务器地址
+```
+
+保持终端连接，然后打开 <http://127.0.0.1:8080>。
+
+### 4.4 首次登录
 
 1. 使用默认密码 `password` 登录；
 2. 系统会强制进入修改密码页面；
@@ -229,7 +238,7 @@ UDP：客户端 ──SS-2022 原始 UDP 端口───────────
 - `启动中/停止中`：Agent 正在协调进程；
 - `异常`：查看节点下方错误信息和“日志”。
 
-右上角“刷新”会重新读取节点、流量、备份、审计和更新状态。
+右上角“刷新”会重新读取节点、流量、备份、审计和更新状态。旁边的“白天模式/黑夜模式”按钮可随时切换外观，浏览器会记住你的选择。
 
 ### 6.2 创建或编辑 Snell 节点
 
@@ -397,6 +406,13 @@ sudo ./scripts/update.sh
 
 更新脚本会先把 `/opt/proxy-panel` 打包备份，拉取新镜像并等待健康检查；失败时回滚到旧镜像。
 
+从旧版升级时，更新脚本不会擅自把已有的 `PANEL_BIND=127.0.0.1` 改成公网监听。希望切换为直接访问时，编辑 `/opt/proxy-panel/.env`，改为 `PANEL_BIND=0.0.0.0`，然后执行：
+
+```bash
+cd /opt/proxy-panel
+sudo docker compose up -d --force-recreate
+```
+
 只删除容器、保留数据：
 
 ```bash
@@ -442,7 +458,8 @@ docker logs --tail=200 proxy-panel
 curl -v http://127.0.0.1:8080/healthz
 ```
 
-- SSH 隧道方式：确认 SSH 会话仍在、两端端口都是 `8080`；
+- 直接访问方式：确认 `PANEL_BIND=0.0.0.0`，并检查云安全组和宿主机防火墙是否允许你的来源 IP 访问 `8080/tcp`；
+- SSH 隧道方式：确认已把 `PANEL_BIND` 改为 `127.0.0.1`、SSH 会话仍在且两端端口都是 `8080`；
 - HTTPS 方式：确认反向代理运行、域名解析正确，并能访问 `127.0.0.1:8080`；
 - 修改过 `PANEL_PORT` 时，隧道和反代目标也要同步修改。
 
@@ -511,6 +528,7 @@ export PANEL_AUTO_INSTALL_RUNTIMES=0
 ```bash
 export PANEL_DATA_DIR="$PWD/.dev-data"
 export PANEL_AUTO_INSTALL_RUNTIMES=0
+export PANEL_BIND=127.0.0.1
 ./bin/panel server
 ```
 
@@ -525,6 +543,6 @@ export PANEL_AUTO_INSTALL_RUNTIMES=0
 - 面板版本；
 - 节点类型、监听模式和出现问题的操作；
 - 面板节点日志和 `docker logs --tail=200 proxy-panel` 中相关的脱敏片段；
-- 是否使用 SSH 隧道或 HTTPS 反向代理。
+- 使用服务器 IP 直接访问、SSH 隧道或 HTTPS 反向代理中的哪一种方式。
 
 不要公开上传 `/opt/proxy-panel`、备份归档、`panel.db` 或 `master.key`。
