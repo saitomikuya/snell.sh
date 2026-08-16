@@ -1,0 +1,4 @@
+#!/bin/sh
+exec 2>&1
+while [ ! -f /data/secrets/master.key ]; do sleep 1; done
+exec /usr/local/bin/panel agent

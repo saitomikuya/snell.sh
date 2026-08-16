@@ -1,333 +1,185 @@
-[中文](README.md) ｜ [English](README.en.md)
+# Proxy Panel
 
-# Snell 一键脚本与 Docker 镜像
+Proxy Panel 是面向 Debian/Ubuntu VPS 的单容器中文代理管理面板。它用 Go 提供 Web/API 与受控 Runtime Agent，用 Vue 3 提供响应式界面，并把数据库、配置、运行时、日志和备份统一持久化到 `/data`。
 
-支持 Snell v4 / v5 / v6、Snell 多用户、ShadowTLS v3、流量管理，以及 Docker / Docker Compose 部署。
+本项目是在 [jinqians/snell.sh](https://github.com/jinqians/snell.sh) 与 [jinqians/ss-2022.sh](https://github.com/jinqians/ss-2022.sh) 的功能和配置语义基础上进行的可视化二次开发，不是上游官方版本。新增能力主要包括中文 Web 面板、节点操作、客户端配置、流量限额、备份恢复、版本检查和行为审计。
 
-## 脚本安装
+## 一键部署
 
-### 自动识别系统安装
-
-```bash
-sh -c "$(curl -fsSL https://install.jinqians.com)"
-```
-
-### Debian / Ubuntu 多功能管理菜单
-
-推荐 Debian / Ubuntu 用户优先使用管理菜单，可安装和管理 Snell、ShadowTLS、多用户、流量限制等功能。
+Docker Hub 镜像 `saitomikuya/proxy-panel:latest` 同时支持 `linux/amd64` 和 `linux/arm64`。已经安装 Docker 的 Debian/Ubuntu VPS 可直接执行：
 
 ```bash
-bash <(curl -L -s menu.jinqians.com)
+sudo docker run -d --name proxy-panel --pull=always --restart unless-stopped --network host --cap-add NET_ADMIN --cap-add NET_RAW -v /opt/proxy-panel:/data -e PANEL_BIND=127.0.0.1 -e PANEL_PORT=8080 -e TZ=Asia/Shanghai saitomikuya/proxy-panel:latest
 ```
 
-### 按系统选择脚本
-
-| 系统 | 命令 | 说明 |
-|------|------|------|
-| Debian / Ubuntu | `bash <(curl -L -s snell.jinqians.com)` | Snell 主安装脚本 |
-| CentOS | `bash <(curl -L -s snell-centos.jinqians.com)` | CentOS 版 Snell 安装脚本 |
-| Alpine 本地构建 | `sh -c "$(curl -fsSL https://snell-docker.jinqians.com)"` | Alpine 本地构建安装 |
-| Alpine 3.18 | `sh -c "$(curl -fsSL https://snell-alpine.jinqians.com)"` | Alpine 3.18 安装 |
-
-### ShadowTLS 说明
-
-在脚本中为 Snell 配置 ShadowTLS 后，脚本会把 Snell 后端改为仅监听 `127.0.0.1:Snell端口`，客户端只连接 ShadowTLS 对外端口。这样可以避免原始 Snell 端口继续暴露在公网。
-
-## Docker 快速使用
-
-Docker Hub 镜像：`jinqians/snell-server`
-
-| 标签 | 版本 | 说明 |
-|------|------|------|
-| `latest` | Snell v5.0.1 | 固定指向 v5，不指向 v6 |
-| `v4` | Snell v4.1.1 | v4 当前推荐版本 |
-| `v5` | Snell v5.0.1 | v5 当前推荐版本 |
-| `v6` | Snell v6.0.0b4 | v6 当前 Beta 版本 |
-| `v4.0.0` / `v4.0.1` / `v4.1.0` / `v4.1.1` | Snell v4 | 固定版本标签 |
-| `v5.0.0` / `v5.0.1` | Snell v5 | 固定版本标签 |
-| `v6.0.0b1` / `v6.0.0b2` / `v6.0.0b3` / `v6.0.0b4` | Snell v6 beta | 固定版本标签 |
-
-架构支持：
-- v4 / v5: `linux/amd64`、`linux/arm64`、`linux/arm/v7`
-- v6: `linux/amd64`、`linux/arm64`
-
-### 运行 Snell v5
+在自己的电脑建立 SSH 隧道：
 
 ```bash
-docker run -d --name snell-server \
-  --restart unless-stopped \
-  -p 6160:6160/tcp \
-  -p 6160:6160/udp \
-  -e SNELL_PORT=6160 \
-  -e SNELL_VER=v5 \
-  -v ./snell-config:/etc/snell \
-  jinqians/snell-server:v5
+ssh -L 8080:127.0.0.1:8080 root@你的服务器地址
 ```
 
-查看自动生成的 PSK：
+然后打开 <http://127.0.0.1:8080>，使用默认密码 `password` 登录并按提示立即改密。公网端口、安全组、HTTPS 反代和面板操作请继续阅读[完整使用说明](./docs/USER_GUIDE.md)。
 
-```bash
-cat ./snell-config/snell-server.conf
-```
+## 使用入口
 
-### 运行 Snell + ShadowTLS
+- 第一次部署、面板逐项操作、客户端导入和排障：阅读[完整使用说明](./docs/USER_GUIDE.md)；
+- 已实现功能与仍有限制的项目：阅读[实现状态](./docs/IMPLEMENTATION_STATUS.md)；
+- 安全设计、威胁边界与测试要求：阅读[安全说明](./SECURITY.md)；
+- 只想本地构建体验：可直接跳到下方“本地开发”或“构建和运行容器”。
 
-```bash
-docker run -d --name snell-shadowtls \
-  --restart unless-stopped \
-  -p 8443:8443/tcp \
-  -e SNELL_PORT=6160 \
-  -e SNELL_VER=v5 \
-  -e SNELL_LISTEN_HOST=127.0.0.1 \
-  -e SHADOWTLS_ENABLE=1 \
-  -e SHADOWTLS_PORT=8443 \
-  -e SHADOWTLS_SNI=www.microsoft.com \
-  -v ./snell-config:/etc/snell \
-  jinqians/snell-server:v5
-```
+> 当前自动安装并验证的 Snell 运行时为 v5.0.1。界面保留的 v4/v6 选项需要对应固定运行时和校验清单补齐后再使用；其他已知限制以完整使用说明和实现状态为准。
 
-启用 ShadowTLS 后，客户端连接 `8443`。Snell 后端只在容器内监听 `127.0.0.1:6160`，通常不需要映射 Snell 原始端口。
+本仓库依据 [DEVELOPMENT_SPEC.md](./DEVELOPMENT_SPEC.md) 开发。当前版本已经形成可构建、可测试、可运行的纵向闭环；尚未完成的全功能项单独列在“实现状态”中，不用静态按钮冒充可用功能。
 
-查看客户端需要的密钥：
+## 已实现
 
-```bash
-grep '^psk' ./snell-config/snell-server.conf
-cat ./snell-config/shadowtls-password
-```
+- 无用户名的单密码登录，默认密码固定为 `password`。
+- Argon2id 密码哈希；首次登录强制改密；改密或重置后注销全部 Session。
+- `HttpOnly`、`SameSite=Strict` Cookie，CSRF 双提交校验、Origin 校验和按 IP 登录限速。
+- SQLite WAL、版本化迁移、主密钥 AES-256-GCM 加密节点秘密。
+- Snell、SS-2022、ShadowTLS 节点数据模型、CRUD、依赖和 TCP/UDP 端口冲突校验。
+- Web 与 Agent 之间的 Unix Socket 类型化 RPC；没有任意 Shell 或路径读写接口。
+- 固定路径配置生成、候选配置、最后可用快照、原子替换、失败回滚。
+- 多实例启动、停止、重启、进程组信号、崩溃退避、依赖启动顺序和滚动脱敏日志。
+- 默认 Snell v5.0.1、ShadowTLS v0.2.25 和 shadowsocks-rust v1.24.0 运行时：白名单 HTTPS、大小/超时限制、固定 SHA256、staging 解包和原子安装。
+- 默认部署 Snell + ShadowTLS 与 SS-2022 + ShadowTLS 两套组合；SS 的 UDP 继续使用原始 SS 端口。
+- Snell/Surge、SS/SIP002、ShadowTLS 组合配置和二维码；完整配置在已登录且已完成首次改密的安全会话中直接展示。
+- nftables 公网端口字节采样、按节点周期累计、流量限额、手动/自动暂停恢复；只操作 `inet proxy_panel` 专属表。
+- 节点运行时输出与中文启停、重启、流量活动和限额行为日志。
+- SQLite 一致性备份、哈希校验、路径穿越防护、恢复前自动备份、在线恢复和 Session 注销。
+- 中文桌面/手机面板：仪表盘、节点、流量、上游版本对比与一键更新、备份、中文行为审计和安全设置。
+- 单容器多进程监督、非 root Web、root Agent、host 网络示例、NET_ADMIN/NET_RAW、健康检查。
+- 幂等安装、镜像更新回滚和默认保留数据的卸载脚本。
 
-客户端填写：
+## 仍需完成后才能称为“全功能版”
 
-| 项目 | 填写内容 |
-|------|----------|
-| 服务器 | VPS 公网 IP 或域名 |
-| 端口 | ShadowTLS 对外端口，示例为 `8443` |
-| Snell 版本 | `5` |
-| Snell PSK | `./snell-config/snell-server.conf` 里的 `psk` |
-| ShadowTLS 密码 | `./snell-config/shadowtls-password` 的内容，或手动传入的 `SHADOWTLS_PASSWORD` |
-| ShadowTLS SNI | `SHADOWTLS_SNI`，默认 `www.microsoft.com` |
-| ShadowTLS 版本 | `3` |
+- 节点 CPU/内存/连接数等更细的单节点运行指标。
+- 中国大陆 CIDR 数据集的下载、原子集合切换和定时更新。
+- simple-obfs 二进制的安全安装与失败回滚（配置 Schema 已预留）。
+- Snell v4/v6 的固定版本运行时目录和校验清单；当前自动安装并默认运行 v5。
+- SSE 持续日志流及其连接/速率限制；当前接口返回最近 200 行。
+- 异步更新 Job 进度与手动选择历史运行时回滚；当前一键更新会先自动备份，失败时回滚节点版本。
+- 更完整的宿主机和单节点指标，以及一次性 Linux VM 中的真实协议与特权防火墙验收。
+- 镜像 SBOM、漏洞扫描、签名/provenance 和真实发布流水线。
 
-Surge 示例：
+详见 [实现状态](./docs/IMPLEMENTATION_STATUS.md)。
+
+## 架构
 
 ```text
-HK = snell, 服务器IP, 8443, psk = your_16_plus_char_psk, version = 5, reuse = true, tfo = true, shadow-tls-password = your_shadowtls_password, shadow-tls-sni = www.microsoft.com, shadow-tls-version = 3
+Browser → panel server（UID 10001）→ SQLite / encrypted secrets
+                 │
+                 └── Unix Socket typed RPC → panel agent（受控高权限）
+                                              ├── Snell instances
+                                              ├── ssserver instances
+                                              ├── ShadowTLS instances
+                                              └── proxy_panel nftables table
 ```
 
-## Docker Compose
+Web 不执行协议命令，不接收任意命令字符串。Agent 只根据节点 ID 从数据库读取结构化数据，并将其映射到 `/data` 下的固定路径和参数数组。
 
-### Snell + ShadowTLS
+## 本地开发
 
-创建 `compose.yml`：
-
-```yaml
-services:
-  snell-shadowtls:
-    image: jinqians/snell-server:v5
-    container_name: snell-shadowtls
-    restart: unless-stopped
-    ports:
-      - "8443:8443/tcp"
-    environment:
-      - SNELL_PORT=6160
-      - SNELL_VER=v5
-      - SNELL_LISTEN_HOST=127.0.0.1
-      - SHADOWTLS_ENABLE=1
-      - SHADOWTLS_PORT=8443
-      - SHADOWTLS_SNI=www.microsoft.com
-    volumes:
-      - ./snell-config:/etc/snell
-```
-
-启动：
+要求 Go 1.25+、Node.js 24 和 pnpm 10。
 
 ```bash
-docker compose up -d
+cd web
+pnpm install --frozen-lockfile
+pnpm run build
+cd ..
+go test ./...
+go build -o bin/panel ./cmd/panel
 ```
 
-查看配置：
+启动两个进程；macOS 本地测试不会安装 Linux 运行时或修改防火墙：
 
 ```bash
-docker logs snell-shadowtls
-cat ./snell-config/snell-server.conf
-cat ./snell-config/shadowtls-password
+export PANEL_DATA_DIR="$PWD/.dev-data"
+export PANEL_AUTO_INSTALL_RUNTIMES=0
+./bin/panel agent
 ```
 
-停止并删除：
+在另一终端：
 
 ```bash
-docker compose down
+export PANEL_DATA_DIR="$PWD/.dev-data"
+export PANEL_AUTO_INSTALL_RUNTIMES=0
+./bin/panel server
 ```
 
-## Docker 环境变量
+打开 `http://127.0.0.1:8080`，首次使用 `password` 登录并修改密码。
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `SNELL_VER` | `v4` | Snell 配置模式：`v4`、`v5`、`v6` |
-| `SNELL_PORT` | `6160` | Snell 后端监听端口 |
-| `SNELL_PSK` | 自动生成 | Snell PSK |
-| `SNELL_LISTEN_HOST` | `0.0.0.0` | Snell 监听地址；搭配 ShadowTLS 时使用 `127.0.0.1` |
-| `SNELL_IPV6` | `true` | v4 / v6 配置项 |
-| `SNELL_TFO` | `true` | v4 / v6 配置项 |
-| `SHADOWTLS_ENABLE` | `0` | 设置为 `1` 启用 ShadowTLS |
-| `SHADOWTLS_PORT` | `8443` | ShadowTLS 对外监听端口 |
-| `SHADOWTLS_PASSWORD` | 自动生成 | ShadowTLS 密码，会保存到 `/etc/snell/shadowtls-password` |
-| `SHADOWTLS_SNI` | `www.microsoft.com` | ShadowTLS TLS 伪装 SNI |
-
-## 切换 Docker 版本
-
-切换版本时同时修改镜像标签和 `SNELL_VER`。
+## 构建和运行容器
 
 ```bash
-# v4
-docker run -d --name snell-server \
-  --restart unless-stopped \
-  -p 6160:6160/tcp \
-  -p 6160:6160/udp \
-  -e SNELL_PORT=6160 \
-  -e SNELL_VER=v4 \
-  -v ./snell-config:/etc/snell \
-  jinqians/snell-server:v4
-
-# v6
-docker run -d --name snell-server \
-  --restart unless-stopped \
-  -p 6160:6160/tcp \
-  -p 6160:6160/udp \
-  -e SNELL_PORT=6160 \
-  -e SNELL_VER=v6 \
-  -v ./snell-config:/etc/snell \
-  jinqians/snell-server:v6
+docker build --build-arg VERSION=0.1.0 -t proxy-panel:local .
+PROXY_PANEL_IMAGE=proxy-panel:local docker compose -f compose.example.yaml up -d
 ```
 
-## 本地构建 Docker 镜像
+Compose 示例具备以下边界：
+
+- `network_mode: host`
+- 仅添加 `NET_ADMIN`、`NET_RAW`
+- 不使用 `--privileged`
+- 不挂载 Docker Socket
+- 只把 `/opt/proxy-panel` 挂载为 `/data`
+- 面板默认绑定 `127.0.0.1:8080`
+
+如果设置 `PANEL_BIND=0.0.0.0`，必须先部署可信 HTTPS 反向代理，并设置 `PANEL_SECURE_COOKIE=1`。
+
+## VPS 安装
+
+从仓库检出目录运行：
 
 ```bash
-./build-docker-images.sh
+sudo PROXY_PANEL_IMAGE=你的镜像地址 ./scripts/install.sh
 ```
 
-多架构构建并推送：
+安装器不会静默安装 Docker。它写入 `/opt/proxy-panel/compose.yaml` 与 `.env`，重复执行不会覆盖已有数据。
+
+更新与卸载：
 
 ```bash
-USE_BUILDX=1 PUSH=1 ./build-docker-images.sh
+sudo ./scripts/update.sh
+sudo ./scripts/uninstall.sh
+sudo ./scripts/uninstall.sh --purge  # 明确永久删除 /opt/proxy-panel
 ```
 
-## 协议简介
+## 维护命令
 
-<details>
-   <summary>展开查看</summary>
-
-### Snell 协议
-
-Snell 协议是由 Surge 团队设计的一种轻量级、高效的加密代理协议，专注于提供安全、快速的网络传输服务。该协议通过简洁的设计和加密技术，满足用户对隐私保护和高性能传输的需求。
-
-### Snell v4 vs v5 对比
-
-| 特性 | Snell v4 | Snell v5 |
-|------|----------|----------|
-| 状态 | 稳定版 | 最新版 |
-| 安全性 | 支持 | 支持 |
-| QUIC Proxy | 不支持 | 支持 |
-| Dynamic Record Sizing | 不支持 | 支持 |
-| 出口控制 | 不支持 | 支持 |
-
-### ShadowTLS
-
-ShadowTLS 是一个轻量级的 TLS 伪装工具，可以模拟正常 HTTPS 流量，用于提升连接隐蔽性和稳定性。
-
-</details>
-
-## 流量管理
-
-<details>
-   <summary>流量管理说明[展开查看]</summary>
-
-### 功能说明
-通过 iptables 对 Snell 节点进行流量计数，支持设置月度流量上限，超限后自动暂停节点，每月指定日期自动重置。
-
-### 计量原理
-Snell 以明文 TCP 监听在指定端口，流量管理通过在 iptables 中添加专用计数规则（`PSM_TRF` 链）统计该端口的进出字节数，不影响数据包的正常转发。超限时向 `INPUT` 链插入 DROP 规则，阻断新连接。
-
-```
-客户端 ──TCP──▶ iptables 计数 ──▶ snell-server
-                     │
-                   超限时 DROP
-```
-
-### 使用方式
-在管理菜单中选择 **9. 流量管理**，进入交互向导：
-
-```
-1. 添加 / 修改流量限制   → 选择节点，设置上限 (GB) 和每月重置日
-2. 查看流量状态         → 显示各节点已用流量、剩余、暂停状态
-3. 手动暂停节点         → 立即阻断指定节点的新连接
-4. 手动恢复节点         → 移除 DROP 规则，恢复正常访问
-5. 重置流量统计         → 清零计数，并恢复被暂停的节点
-```
-
-### 自动检查定时器
-首次配置后会提示安装 systemd 定时器（`psm-traffic.timer`），每分钟执行一次检查：
-- 累计流量 ≥ 限额 → 自动暂停节点
-- 到达重置日 → 清零计数并恢复节点
-
-手动查看定时器状态：
 ```bash
-systemctl status psm-traffic.timer
+docker exec proxy-panel panelctl reset-password password
+docker exec proxy-panel panelctl cleanup-firewall
+docker exec proxy-panel panel version
 ```
 
-### 注意事项
-- 流量计数基于 iptables 字节计数器，**服务器重启后计数器归零**，但已累计的流量数据保存在 `/etc/psm/traffic/state.json` 中，下次计数从断点续计
-- 暂停节点仅阻断**新连接**，已建立的 TCP 连接会在自然断开后失效
-- 若系统使用 nftables，需确认 iptables 兼容层已启用（`iptables-legacy` 或 `iptables-nft`）
-- Snell 使用 TCP，流量计数不包含 UDP
+重置密码会恢复为 `password`、重新进入强制改密状态并注销全部会话。
 
-</details>
+## 运行时供应链
 
-## 🥇 赞助
-+ [ZMTO](https://console.zmto.com/?affid=1567)
-+ [ZMTO 测评](https://vps.jinqians.com/zmto/)
+生产镜像不包含 Snell、shadowsocks-rust 或 ShadowTLS 二进制。Agent 首次启动时只从 [运行时目录](./internal/runtime/catalog.yaml) 中列出的固定 URL 下载，并校验固定 SHA256：
 
-## 手搓snell
-[点击跳转](https://vps.jinqians.com/snell-v4%e9%83%a8%e7%bd%b2%e6%95%99%e7%a8%8b/)
+- Snell v5.0.1：`dl.nssurge.com`
+- shadowsocks-rust v1.24.0：官方 GitHub Release
+- ShadowTLS v0.2.25：官方 GitHub Release
 
-<details>
-   <summary>surge配置文件[点击展开]</summary>
-   
-## Surge配置文件
-自用配置文件：https://raw.githubusercontent.com/jinqians/snell.sh/refs/heads/main/surge.conf
-### 配置文件说明
-- Snell V4 配置示例
-- Snell V5 配置示例
-- Snell + ShadowTLS 配置示例
-- VMESS 配置示例
-- surge 订阅示例
-</details>
+下载限制为 100 MiB、2 分钟、最多 5 次重定向；重定向目标也必须在白名单内。Snell 的再分发条件未确认，因此只允许运行时从 Surge 官方源下载，不写入镜像或仓库。
 
-<details>
-   <summary>脚本输出示例[点击展开]</summary>
-   
-### Snell v4 配置
-```
-=== 配置信息 ===
-当前安装版本: Snell v4
-# 原始 Snell 配置
-HK = snell, 1.2.3.4, 57891, psk = xxxxxxxxxxxx, version = 4, reuse = true, tfo = true
-HK = snell, ::1, 57891, psk = xxxxxxxxxxxx, version = 4, reuse = true, tfo = true
+## 安全与测试
+
+普通测试绝不修改本机 nftables/iptables。特权测试必须在一次性 Linux VM/CI 中显式设置 `RUN_PRIVILEGED_TESTS=1`。参见 [SECURITY.md](./SECURITY.md)。
+
+```bash
+go vet ./...
+go test -race ./...
+cd web && pnpm run typecheck && pnpm test && pnpm run build
+sh -n scripts/*.sh packaging/docker/entrypoint.sh packaging/s6/*/run
 ```
 
-### Snell v5 配置
-```
-=== 配置信息 ===
-当前安装版本: Snell v5
-# Snell v5 配置（支持 v4 和 v5 客户端）
-HK = snell, 1.2.3.4, 57891, psk = xxxxxxxxxxxx, version = 4, reuse = true, tfo = true
-HK = snell, 1.2.3.4, 57891, psk = xxxxxxxxxxxx, version = 5, reuse = true, tfo = true
-```
+## 数据目录
 
-### Snell + ShadowTLS 配置
-```
-=== 配置信息 ===
-# 带 ShadowTLS 的配置
-HK = snell, 1.2.3.4, 8989, psk = xxxxxxxxxxxx, version = 4, reuse = true, tfo = true, shadow-tls-password = yyyyyyyyyyyy, shadow-tls-sni = www.microsoft.com, shadow-tls-version = 3
-HK = snell, ::1, 8989, psk = xxxxxxxxxxxx, version = 4, reuse = true, tfo = true, shadow-tls-password = yyyyyyyyyyyy, shadow-tls-sni = www.microsoft.com, shadow-tls-version = 3
-```
-</details>
+数据库位于 `/data/db/panel.db`，主密钥位于 `/data/secrets/master.key`。不要只复制数据库而遗漏主密钥；否则加密秘密无法恢复。内置备份同时保存数据库、主密钥、配置和上游元数据，并设置为仅服务用户可访问。
+
+## 开源许可与致谢
+
+本仓库作为 [`jinqians/snell.sh`](https://github.com/jinqians/snell.sh) 的可视化二次开发 Fork，沿用 GNU General Public License v3.0，详见 [LICENSE](./LICENSE)。原项目、SS-2022 参考项目及各运行时的许可和再分发说明见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。

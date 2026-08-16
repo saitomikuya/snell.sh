@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+
+BASE_DIR=/opt/proxy-panel
+IMAGE=${PROXY_PANEL_IMAGE:-saitomikuya/proxy-panel:latest}
+
+[ "$(id -u)" -eq 0 ] || { echo "请以 root 运行安装器" >&2; exit 1; }
+[ "$(uname -s)" = Linux ] || { echo "仅支持 Linux" >&2; exit 1; }
+case "$(uname -m)" in x86_64|aarch64|arm64) ;; *) echo "仅支持 amd64/arm64" >&2; exit 1;; esac
+command -v docker >/dev/null 2>&1 || { echo "未安装 Docker Engine，请先按 Docker 官方文档安装" >&2; exit 1; }
+docker compose version >/dev/null 2>&1 || { echo "缺少 Docker Compose 插件" >&2; exit 1; }
+
+install -d -m 0750 "$BASE_DIR"
+if [ ! -f "$BASE_DIR/.env" ]; then
+  umask 077
+  {
+    echo "PROXY_PANEL_IMAGE=$IMAGE"
+    echo "PANEL_BIND=${PANEL_BIND:-127.0.0.1}"
+    echo "PANEL_PORT=${PANEL_PORT:-8080}"
+    echo "PANEL_SECURE_COOKIE=${PANEL_SECURE_COOKIE:-0}"
+    echo "TZ=${TZ:-Asia/Shanghai}"
+  } > "$BASE_DIR/.env"
+fi
+if [ ! -f "$BASE_DIR/compose.yaml" ]; then
+  install -m 0644 "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)/compose.example.yaml" "$BASE_DIR/compose.yaml"
+fi
+
+cd "$BASE_DIR"
+docker compose pull
+docker compose up -d
+attempt=0
+while [ "$attempt" -lt 60 ]; do
+  status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' proxy-panel 2>/dev/null || true)
+  [ "$status" = healthy ] && break
+  [ "$status" = unhealthy ] && { docker compose logs --tail=100; exit 1; }
+  attempt=$((attempt+1)); sleep 2
+done
+[ "${status:-}" = healthy ] || { echo "容器未在超时时间内健康启动" >&2; exit 1; }
+port=${PANEL_PORT:-8080}
+echo "安装完成：http://127.0.0.1:$port"
+echo "默认密码：password（首次登录必须修改）"
+echo "远程访问建议：ssh -L ${port}:127.0.0.1:${port} root@你的服务器"

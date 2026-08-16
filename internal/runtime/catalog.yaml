@@ -1,0 +1,35 @@
+schema_version: 1
+runtimes:
+  snell:
+    version: v5.0.1
+    format: zip
+    binary: snell-server
+    assets:
+      amd64:
+        url: https://dl.nssurge.com/snell/snell-server-v5.0.1-linux-amd64.zip
+        sha256: 9bea1c2b9e35b73b31634856c04d18c393072b9e5dcde6a32781d8b8f908c539
+      arm64:
+        url: https://dl.nssurge.com/snell/snell-server-v5.0.1-linux-aarch64.zip
+        sha256: 2f178bf5ac468ce1a130454efa40a0603fbbe4e47ecc4880a989f4abc7f824cf
+  shadowsocks-rust:
+    version: v1.24.0
+    format: tar.xz
+    binary: ssserver
+    assets:
+      amd64:
+        url: https://github.com/shadowsocks/shadowsocks-rust/releases/download/v1.24.0/shadowsocks-v1.24.0.x86_64-unknown-linux-musl.tar.xz
+        sha256: 0d84f5f350ec99396867d718f146fc3810975b2a7cd06192f158d96bdef460e7
+      arm64:
+        url: https://github.com/shadowsocks/shadowsocks-rust/releases/download/v1.24.0/shadowsocks-v1.24.0.aarch64-unknown-linux-musl.tar.xz
+        sha256: e00b6551f40bb2d61adb2503909e0df6550c022372c812f3f34350510797ef2f
+  shadowtls:
+    version: v0.2.25
+    format: raw
+    binary: shadow-tls
+    assets:
+      amd64:
+        url: https://github.com/ihciah/shadow-tls/releases/download/v0.2.25/shadow-tls-x86_64-unknown-linux-musl
+        sha256: a173f5f2d57f45211b68e10ceeddc15b1791077b914fa89747bc705fddc71532
+      arm64:
+        url: https://github.com/ihciah/shadow-tls/releases/download/v0.2.25/shadow-tls-aarch64-unknown-linux-musl
+        sha256: 3295476b37f549a68906519d3eaecb74bf3b6eaf9094cebb16ee84f0151373c6

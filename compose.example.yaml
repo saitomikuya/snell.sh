@@ -1,0 +1,23 @@
+services:
+  proxy-panel:
+    image: ${PROXY_PANEL_IMAGE}
+    container_name: proxy-panel
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - /opt/proxy-panel:/data
+    environment:
+      PANEL_BIND: ${PANEL_BIND:-127.0.0.1}
+      PANEL_PORT: ${PANEL_PORT:-8080}
+      PANEL_SECURE_COOKIE: ${PANEL_SECURE_COOKIE:-0}
+      PANEL_AUTO_INSTALL_RUNTIMES: ${PANEL_AUTO_INSTALL_RUNTIMES:-1}
+      TZ: ${TZ:-Asia/Shanghai}
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/panel", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
