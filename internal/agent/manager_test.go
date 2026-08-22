@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,24 @@ import (
 	"github.com/proxy-panel/proxy-panel/internal/nodes"
 	secretstore "github.com/proxy-panel/proxy-panel/internal/secrets"
 )
+
+func TestAppendLogKeepsBoundedArchives(t *testing.T) {
+	dir := t.TempDir()
+	manager := &Manager{}
+	path := filepath.Join(dir, "node.log")
+	line := strings.Repeat("x", int(maxNodeLogSize))
+	for range 4 {
+		manager.appendLog(path, line)
+	}
+	for _, name := range []string{"node.log", "node.log.1", "node.log.2"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("expected retained log %s: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "node.log.3")); !os.IsNotExist(err) {
+		t.Fatalf("unexpected extra log archive: %v", err)
+	}
+}
 
 func TestManagerWithFakeRuntime(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -51,6 +70,14 @@ func TestManagerWithFakeRuntime(t *testing.T) {
 	defer manager.Shutdown()
 	if _, err = manager.Apply(node.ID); err != nil {
 		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "config", "snell", node.ID+".conf")
+	info, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0640 {
+		t.Fatalf("config mode = %o, want 0640", info.Mode().Perm())
 	}
 	if _, err = manager.Start(node.ID); err != nil {
 		t.Fatal(err)

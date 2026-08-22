@@ -89,6 +89,42 @@ func (s *Store) Audit(ctx context.Context, action, targetType, targetID, remoteI
 	_, _ = s.DB.ExecContext(ctx, `INSERT INTO audit_logs(action,target_type,target_id,remote_ip,details,success,created_at) VALUES(?,?,?,?,?,?,?)`, action, targetType, targetID, remoteIP, details, boolInt(success), Now())
 }
 
+// Maintain bounds tables that otherwise grow forever on long-running hosts.
+// It intentionally keeps enough recent history for troubleshooting while
+// remaining small enough for sub-gigabyte system disks.
+func (s *Store) Maintain(ctx context.Context) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	cutoff := time.Now().UTC().Add(-30 * 24 * time.Hour).Format(time.RFC3339Nano)
+	statements := []struct {
+		query string
+		args  []any
+	}{
+		{`DELETE FROM sessions WHERE expires_at < ?`, []any{Now()}},
+		{`DELETE FROM audit_logs WHERE id NOT IN (SELECT id FROM audit_logs ORDER BY id DESC LIMIT 500)`, nil},
+		{`DELETE FROM config_revisions WHERE id IN (
+			SELECT older.id FROM config_revisions AS older
+			WHERE (SELECT COUNT(*) FROM config_revisions AS newer WHERE newer.node_id=older.node_id AND newer.revision>older.revision) >= 20
+		)`, nil},
+		{`DELETE FROM secrets WHERE id NOT IN (SELECT secret_ref FROM node_configs)`, nil},
+		{`DELETE FROM jobs WHERE updated_at < ? AND status IN ('succeeded','failed','completed','cancelled')`, []any{cutoff}},
+	}
+	for _, statement := range statements {
+		if _, err = tx.ExecContext(ctx, statement.query, statement.args...); err != nil {
+			return err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	var busy, frames, checkpointed int
+	_ = s.DB.QueryRowContext(ctx, `PRAGMA wal_checkpoint(PASSIVE)`).Scan(&busy, &frames, &checkpointed)
+	return nil
+}
+
 func boolInt(v bool) int {
 	if v {
 		return 1

@@ -147,7 +147,9 @@ func Serve(socket string, manager *Manager) error {
 	go func() {
 		manager.Reconcile()
 		_ = manager.SampleTraffic()
-		ticker := time.NewTicker(5 * time.Second)
+		// Thirty seconds is sufficiently responsive for quota enforcement while
+		// avoiding needless SQLite and log writes on very small VPS instances.
+		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		cycles := 0
 		for range ticker.C {

@@ -34,6 +34,7 @@ func Load() (Config, error) {
 func (c Config) Address() string { return fmt.Sprintf("%s:%d", c.Bind, c.Port) }
 
 func (c Config) InitDirectories() error {
+	directoryMode := os.FileMode(0770) | os.ModeSetgid
 	dirs := []string{
 		"db", "config/snell", "config/ss", "config/shadowtls", "runtime",
 		"upstream/manifests", "upstream/scripts", "upstream/checksums", "releases",
@@ -41,12 +42,16 @@ func (c Config) InitDirectories() error {
 	}
 	for _, dir := range dirs {
 		path := filepath.Join(c.DataDir, dir)
-		if err := os.MkdirAll(path, 02770); err != nil {
+		if err := os.MkdirAll(path, directoryMode); err != nil {
 			return err
 		}
 		if os.Geteuid() == 0 {
-			_ = os.Chown(path, c.UID, c.GID)
-			_ = os.Chmod(path, 02770)
+			if err := os.Chown(path, c.UID, c.GID); err != nil {
+				return err
+			}
+		}
+		if err := os.Chmod(path, directoryMode); err != nil {
+			return err
 		}
 	}
 	probe := filepath.Join(c.DataDir, ".write-test")

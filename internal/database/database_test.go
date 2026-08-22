@@ -1,6 +1,7 @@
 package database_test
 
 import (
+	"context"
 	"sync"
 	"testing"
 
@@ -35,5 +36,31 @@ func TestConcurrentOpenCanApplyMigrations(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestMaintainBoundsAuditHistory(t *testing.T) {
+	dir := t.TempDir()
+	if err := (config.Config{DataDir: dir}).InitDirectories(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := database.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	for index := 0; index < 550; index++ {
+		store.Audit(ctx, "test", "test", "", "local", "{}", true)
+	}
+	if err = store.Maintain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err = store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit_logs`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 500 {
+		t.Fatalf("expected 500 retained audit rows, got %d", count)
 	}
 }

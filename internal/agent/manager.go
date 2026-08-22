@@ -34,6 +34,13 @@ type process struct {
 	stopping  bool
 	exited    bool
 }
+
+const (
+	maxNodeLogSize      int64 = 2 * 1024 * 1024
+	maxNodeLogArchives        = 2
+	stableRuntimeWindow       = 10 * time.Minute
+)
+
 type Manager struct {
 	mu        sync.Mutex
 	logMu     sync.Mutex
@@ -80,7 +87,7 @@ func (m *Manager) Apply(nodeID string) (Result, error) {
 	target := filepath.Join(dir, node.ID+configgen.Extension(node.Type))
 	candidate := target + ".candidate"
 	backup := target + ".last-good"
-	if err = os.WriteFile(candidate, content, 0600); err != nil {
+	if err = os.WriteFile(candidate, content, 0640); err != nil {
 		return Result{}, err
 	}
 	if err = m.validateCandidate(node, candidate); err != nil {
@@ -116,6 +123,9 @@ func (m *Manager) Start(id string) (Result, error) {
 	return m.startLocked(id)
 }
 func (m *Manager) startLocked(id string) (Result, error) {
+	return m.startLockedWithRestarts(id, 0)
+}
+func (m *Manager) startLockedWithRestarts(id string, restarts int) (Result, error) {
 	if m.closed {
 		return Result{}, errors.New("agent is shutting down")
 	}
@@ -149,9 +159,9 @@ func (m *Manager) startLocked(id string) (Result, error) {
 	}
 	cmd := exec.CommandContext(ctx, binary, args...)
 	if node.Type == "shadowtls" {
-		cmd.Env = append(os.Environ(), "MONOIO_FORCE_LEGACY_DRIVER=1", "RUST_LOG=info")
+		cmd.Env = append(os.Environ(), "MONOIO_FORCE_LEGACY_DRIVER=1", "RUST_LOG=warn")
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = childProcessAttributes()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()
@@ -167,9 +177,9 @@ func (m *Manager) startLocked(id string) (Result, error) {
 		cancel()
 		return Result{}, err
 	}
-	p := &process{cmd: cmd, cancel: cancel, started: time.Now(), state: "running"}
+	p := &process{cmd: cmd, cancel: cancel, started: time.Now(), restarts: restarts, state: "running"}
 	m.processes[id] = p
-	_ = m.nodes.UpdateRuntime(context.Background(), id, "running", cmd.Process.Pid, "", 0)
+	_ = m.nodes.UpdateRuntime(context.Background(), id, "running", cmd.Process.Pid, "", restarts)
 	m.appendLog(logPath, fmt.Sprintf("[运行状态] 节点进程已启动（PID %d）", cmd.Process.Pid))
 	go m.capture(logPath, "标准输出", stdout)
 	go m.capture(logPath, "错误输出", stderr)
@@ -246,6 +256,9 @@ func (m *Manager) wait(id string, p *process) {
 	if nodeErr != nil || node.DesiredState != "running" {
 		return
 	}
+	if time.Since(p.started) >= stableRuntimeWindow {
+		p.restarts = 0
+	}
 	if p.restarts >= 6 {
 		p.state = "failed"
 		_ = m.nodes.UpdateRuntime(context.Background(), id, "failed", 0, message, p.restarts)
@@ -254,15 +267,15 @@ func (m *Manager) wait(id string, p *process) {
 	p.restarts++
 	delay := []time.Duration{time.Second, 2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second, 60 * time.Second}[p.restarts-1]
 	m.appendLog(logPath, fmt.Sprintf("[运行状态] 将在 %s 后自动重启（第 %d 次）", delay, p.restarts))
-	go func() {
+	go func(restarts int) {
 		time.Sleep(delay)
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		if !m.closed {
 			delete(m.processes, id)
-			_, _ = m.startLocked(id)
+			_, _ = m.startLockedWithRestarts(id, restarts)
 		}
-	}()
+	}(p.restarts)
 	_ = exit
 }
 
@@ -446,8 +459,8 @@ func (m *Manager) appendLog(path, line string) {
 	m.logMu.Lock()
 	defer m.logMu.Unlock()
 	_ = os.MkdirAll(filepath.Dir(path), 0750)
-	if info, err := os.Stat(path); err == nil && info.Size() > 10*1024*1024 {
-		for i := 4; i >= 1; i-- {
+	if info, err := os.Stat(path); err == nil && info.Size() > maxNodeLogSize {
+		for i := maxNodeLogArchives - 1; i >= 1; i-- {
 			_ = os.Rename(fmt.Sprintf("%s.%d", path, i), fmt.Sprintf("%s.%d", path, i+1))
 		}
 		_ = os.Rename(path, path+".1")
@@ -506,7 +519,7 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0640)
 	if err != nil {
 		return err
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/proxy-panel/proxy-panel/internal/agent"
 	"github.com/proxy-panel/proxy-panel/internal/api"
 	"github.com/proxy-panel/proxy-panel/internal/auth"
+	"github.com/proxy-panel/proxy-panel/internal/backup"
 	"github.com/proxy-panel/proxy-panel/internal/config"
 	"github.com/proxy-panel/proxy-panel/internal/database"
 	"github.com/proxy-panel/proxy-panel/internal/nodes"
@@ -92,6 +93,9 @@ func runServer() error {
 	if err = nodeStore.InitializeDefaults(context.Background()); err != nil {
 		return err
 	}
+	maintenanceContext, stopMaintenance := context.WithCancel(context.Background())
+	defer stopMaintenance()
+	go maintain(maintenanceContext, store)
 	handler := api.New(store, authService, nodeStore, agent.NewClient(cfg.AgentSocket), cfg.SecureCookie, version).Handler()
 	server := &http.Server{Addr: cfg.Address(), Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	errChannel := make(chan error, 1)
@@ -112,6 +116,29 @@ func runServer() error {
 			return nil
 		}
 		return err
+	}
+}
+
+func maintain(ctx context.Context, store *database.Store) {
+	service := backup.New(store.DB, store.DataDir)
+	run := func() {
+		if err := store.Maintain(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("database maintenance failed: %v", err)
+		}
+		if err := service.Prune(ctx, 2); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("backup retention failed: %v", err)
+		}
+	}
+	run()
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			run()
+		}
 	}
 }
 func runAgent() error {

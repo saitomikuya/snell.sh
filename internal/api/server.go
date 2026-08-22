@@ -5,6 +5,7 @@ import (
 	"embed"
 	"encoding/json"
 	"io/fs"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -34,6 +35,7 @@ type Server struct {
 	backups      *backup.Service
 	updates      *updates.Service
 	limiter      *auth.Limiter
+	loginGate    chan struct{}
 	secureCookie bool
 	version      string
 }
@@ -46,7 +48,7 @@ type contextKey string
 const sessionKey contextKey = "session"
 
 func New(store *database.Store, authService *auth.Service, nodeStore *nodes.Store, agentClient *agent.Client, secure bool, version string) *Server {
-	return &Server{store: store, auth: authService, nodes: nodeStore, agent: agentClient, traffic: traffic.New(store.DB), backups: backup.New(store.DB, store.DataDir), updates: updates.New(store.DB, store.DataDir, version), limiter: auth.NewLimiter(), secureCookie: secure, version: version}
+	return &Server{store: store, auth: authService, nodes: nodeStore, agent: agentClient, traffic: traffic.New(store.DB), backups: backup.New(store.DB, store.DataDir), updates: updates.New(store.DB, store.DataDir, version), limiter: auth.NewLimiter(), loginGate: make(chan struct{}, 1), secureCookie: secure, version: version}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -138,6 +140,13 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if !decode(w, r, &body) {
+		return
+	}
+	select {
+	case s.loginGate <- struct{}{}:
+		defer func() { <-s.loginGate }()
+	default:
+		writeError(w, 429, "LOGIN_BUSY", "登录验证繁忙，请稍后再试")
 		return
 	}
 	session, err := s.auth.Login(r.Context(), body.Password, ip, r.UserAgent())
@@ -704,8 +713,8 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": message}})
 }
 func internal(w http.ResponseWriter, err error) {
+	log.Printf("api internal error: %v", err)
 	writeError(w, 500, "INTERNAL_ERROR", "内部错误")
-	_ = err
 }
 func notFound(w http.ResponseWriter) { writeError(w, 404, "NOT_FOUND", "资源不存在") }
 func spa(files http.Handler, sub fs.FS) http.Handler {

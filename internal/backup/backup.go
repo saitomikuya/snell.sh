@@ -89,6 +89,37 @@ func (s *Service) List(ctx context.Context) ([]Entry, error) {
 	}
 	return out, rows.Err()
 }
+
+// Prune keeps only the newest backups and removes both the archive and its
+// database record. Missing archive files are treated as already removed.
+func (s *Service) Prune(ctx context.Context, keep int) error {
+	if keep < 1 {
+		keep = 1
+	}
+	entries, err := s.List(ctx)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries[minimum(keep, len(entries)):] {
+		if filepath.Base(entry.Filename) != entry.Filename {
+			return fmt.Errorf("invalid backup name")
+		}
+		if err = os.Remove(filepath.Join(s.dataDir, "backups", entry.Filename)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		if _, err = s.db.ExecContext(ctx, `DELETE FROM backups WHERE id=?`, entry.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func minimum(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
+}
 func (s *Service) Delete(ctx context.Context, id string) error {
 	var name string
 	if err := s.db.QueryRowContext(ctx, `SELECT filename FROM backups WHERE id=?`, id).Scan(&name); err != nil {
