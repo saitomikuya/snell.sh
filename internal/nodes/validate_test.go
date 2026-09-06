@@ -21,3 +21,10 @@ func TestValidationRejectsHostnamesAsListenAddresses(t *testing.T) {
 		t.Fatal("expected validation error")
 	}
 }
+
+func TestValidationAllowsAnOmittedListenAddress(t *testing.T) {
+	req := CreateRequest{Type: "snell", Name: "node", RuntimeVersion: "v5", ListenPort: 1234, Config: Config{Version: "v5"}}
+	if err := Validate(req); err != nil {
+		t.Fatalf("omitted listen address should use %s: %v", DefaultListenHost, err)
+	}
+}

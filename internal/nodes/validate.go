@@ -13,6 +13,9 @@ var namePattern = regexp.MustCompile(`^[^\x00-\x1f\x7f]{1,64}$`)
 var hostnamePattern = regexp.MustCompile(`^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$`)
 
 func Validate(req CreateRequest) error {
+	if req.ListenHost == "" {
+		req.ListenHost = DefaultListenHost
+	}
 	if !utf8.ValidString(req.Name) || !namePattern.MatchString(req.Name) {
 		return errors.New("节点名称必须为 1–64 个可见字符")
 	}
