@@ -18,4 +18,9 @@ CREATE TABLE backups(id TEXT PRIMARY KEY, filename TEXT NOT NULL UNIQUE, sha256 
 `,
 	`CREATE TABLE IF NOT EXISTS app_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);`,
 	`CREATE TABLE IF NOT EXISTS traffic_samples(node_id TEXT PRIMARY KEY, upload_bytes INTEGER NOT NULL DEFAULT 0, download_bytes INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL);`,
+	`CREATE TABLE IF NOT EXISTS project_traffic(id INTEGER PRIMARY KEY CHECK(id=1), period TEXT NOT NULL, upload_bytes INTEGER NOT NULL DEFAULT 0, download_bytes INTEGER NOT NULL DEFAULT 0, quota_bytes INTEGER NOT NULL DEFAULT 0, reset_day INTEGER NOT NULL DEFAULT 1, paused INTEGER NOT NULL DEFAULT 0, paused_by_quota INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL);
+INSERT OR IGNORE INTO project_traffic(id,period,updated_at) VALUES(1,strftime('%Y-%m-01','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+CREATE TABLE IF NOT EXISTS system_settings(id INTEGER PRIMARY KEY CHECK(id=1), log_max_mb INTEGER NOT NULL DEFAULT 10 CHECK(log_max_mb BETWEEN 1 AND 1024), updated_at TEXT NOT NULL);
+INSERT OR IGNORE INTO system_settings(id,log_max_mb,updated_at) VALUES(1,10,strftime('%Y-%m-%dT%H:%M:%fZ','now'));`,
+	`ALTER TABLE system_settings ADD COLUMN log_enabled INTEGER NOT NULL DEFAULT 1;`,
 }

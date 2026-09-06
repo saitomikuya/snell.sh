@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -25,13 +26,8 @@ const maxMetadataSize = 2 << 20
 var embeddedAdapter embed.FS
 
 type Adapter struct {
-	SchemaVersion int                   `yaml:"schema_version" json:"schemaVersion"`
-	Repositories  map[string]Repository `yaml:"repositories" json:"repositories"`
-	Runtimes      map[string]Runtime    `yaml:"runtimes" json:"runtimes"`
-}
-type Repository struct {
-	URL             string `yaml:"url" json:"url"`
-	SupportedCommit string `yaml:"supported_commit" json:"supportedCommit"`
+	SchemaVersion int                `yaml:"schema_version" json:"schemaVersion"`
+	Runtimes      map[string]Runtime `yaml:"runtimes" json:"runtimes"`
 }
 type Runtime struct {
 	Source         string   `yaml:"source" json:"source"`
@@ -54,6 +50,7 @@ type Component struct {
 }
 type Status struct {
 	PanelVersion string      `json:"panelVersion"`
+	Architecture string      `json:"architecture"`
 	CheckedAt    string      `json:"checkedAt"`
 	Compatible   bool        `json:"compatible"`
 	Message      string      `json:"message"`
@@ -85,6 +82,7 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 		var cached Status
 		if json.Unmarshal(raw, &cached) == nil && cached.Adapter.SchemaVersion == adapter.SchemaVersion {
 			cached.PanelVersion = s.version
+			cached.Architecture = runtime.GOARCH
 			if err = s.refreshCurrent(ctx, &cached); err != nil {
 				return Status{}, err
 			}
@@ -104,7 +102,7 @@ func (s *Service) Check(ctx context.Context) (Status, error) {
 		return Status{}, err
 	}
 	status.CheckedAt = time.Now().UTC().Format(time.RFC3339)
-	status.Message = "已对比原 GitHub 脚本仓库和官方运行时版本；可更新项仅在通过兼容目录校验后开放一键更新。"
+	status.Message = "已对比 Snell Server、shadowsocks-rust 和 ShadowTLS 的官方运行时版本；只有通过兼容与校验目录验证的版本才可一键更新。"
 
 	latest := map[string]string{}
 	latest["snell"], err = s.latestSnell(ctx)
@@ -134,30 +132,9 @@ func (s *Service) Check(ctx context.Context) (Status, error) {
 		case component.CanApply:
 			component.Message = "发现已验证的新版本，可自动备份并一键更新"
 		case component.UpdateAvailable:
-			component.Message = "发现上游新版本，需先加入校验目录后才能更新"
+			component.Message = "发现上游新版本，可从官方来源下载后手动上传适配"
 		default:
 			component.Message = "当前已是最新兼容版本"
-		}
-	}
-	for _, item := range []struct{ key, repo string }{{"snell_scripts", "jinqians/snell.sh"}, {"ss_2022_scripts", "jinqians/ss-2022.sh"}} {
-		value, checkErr := s.latestCommit(ctx, item.repo)
-		if checkErr != nil {
-			setCheckError(status.Components, item.key, checkErr)
-			continue
-		}
-		for index := range status.Components {
-			component := &status.Components[index]
-			if component.Key != item.key {
-				continue
-			}
-			component.LatestVersion = shortCommit(value)
-			component.UpdateAvailable = !strings.HasPrefix(value, component.CurrentVersion) && !strings.HasPrefix(component.CurrentVersion, value)
-			component.Compatible = !component.UpdateAvailable
-			if component.UpdateAvailable {
-				component.Message = "原脚本已有变化；面板不会直接执行远程脚本，等待适配审查"
-			} else {
-				component.Message = "已与当前适配的原脚本提交一致"
-			}
 		}
 	}
 	status.Compatible = adapter.SchemaVersion == 1
@@ -173,7 +150,7 @@ func (s *Service) baseline(ctx context.Context, adapter Adapter) (Status, error)
 	if err != nil {
 		return Status{}, err
 	}
-	components := make([]Component, 0, len(adapter.Runtimes)+len(adapter.Repositories))
+	components := make([]Component, 0, len(adapter.Runtimes))
 	for _, key := range []string{"snell", "shadowsocks-rust", "shadowtls"} {
 		item, ok := adapter.Runtimes[key]
 		if !ok {
@@ -188,14 +165,7 @@ func (s *Service) baseline(ctx context.Context, adapter Adapter) (Status, error)
 		}
 		components = append(components, Component{Key: key, Name: componentName(key), Category: "runtime", CurrentVersion: version, LatestVersion: item.Version, CompatibleVersion: item.Version, Compatible: true, SourceURL: runtimeSourceURL(key), Message: "点击“检查上游版本”获取实时结果"})
 	}
-	for _, key := range []string{"snell_scripts", "ss_2022_scripts"} {
-		item, ok := adapter.Repositories[key]
-		if !ok {
-			continue
-		}
-		components = append(components, Component{Key: key, Name: componentName(key), Category: "script", CurrentVersion: shortCommit(item.SupportedCommit), LatestVersion: "待检查", Compatible: true, SourceURL: item.URL, Message: "用于对照原 GitHub 脚本模块，不会直接覆盖面板"})
-	}
-	return Status{PanelVersion: s.version, Compatible: adapter.SchemaVersion == 1, Message: "点击“检查上游版本”后实时对比；更新前自动创建一致性备份。", Adapter: adapter, Components: components}, nil
+	return Status{PanelVersion: s.version, Architecture: runtime.GOARCH, Compatible: adapter.SchemaVersion == 1, Message: "点击“检查上游版本”后实时对比三个运行时；更新前自动创建一致性备份。", Adapter: adapter, Components: components}, nil
 }
 
 func (s *Service) adapter() (Adapter, error) {
@@ -258,6 +228,18 @@ func (s *Service) refreshCurrent(ctx context.Context, status *Status) error {
 		}
 		component.UpdateAvailable = component.CurrentVersion != "未使用" && component.LatestVersion != "检查失败" && !versionsMatch(component.CurrentVersion, component.LatestVersion)
 		component.CanApply = component.UpdateAvailable && component.Compatible && component.LatestVersion == component.CompatibleVersion
+		switch {
+		case component.LatestVersion == "检查失败":
+			// Keep the concrete check error already attached to the component.
+		case !component.UpdateAvailable && component.Compatible:
+			component.Message = "当前已是最新兼容版本"
+		case !component.UpdateAvailable:
+			component.Message = "当前已使用最新上游版本（手动上传适配）"
+		case component.CanApply:
+			component.Message = "发现已验证的新版本，可自动备份并一键更新"
+		default:
+			component.Message = "发现上游新版本，可下载后手动上传适配"
+		}
 	}
 	return nil
 }
@@ -273,19 +255,6 @@ func (s *Service) latestRelease(ctx context.Context, repo string) (string, error
 		return "", errors.New("GitHub release 未返回版本")
 	}
 	return result.TagName, nil
-}
-
-func (s *Service) latestCommit(ctx context.Context, repo string) (string, error) {
-	var result struct {
-		SHA string `json:"sha"`
-	}
-	if err := s.getJSON(ctx, "https://api.github.com/repos/"+repo+"/commits/main", &result); err != nil {
-		return "", err
-	}
-	if result.SHA == "" {
-		return "", errors.New("GitHub 未返回提交")
-	}
-	return result.SHA, nil
 }
 
 func (s *Service) latestSnell(ctx context.Context) (string, error) {
@@ -353,14 +322,8 @@ func versionsMatch(current, version string) bool {
 	}
 	return current != ""
 }
-func shortCommit(value string) string {
-	if len(value) > 12 {
-		return value[:12]
-	}
-	return value
-}
 func componentName(key string) string {
-	return map[string]string{"snell": "Snell Server", "shadowsocks-rust": "shadowsocks-rust", "shadowtls": "ShadowTLS", "snell_scripts": "原 Snell 管理脚本", "ss_2022_scripts": "原 SS-2022 管理脚本"}[key]
+	return map[string]string{"snell": "Snell Server", "shadowsocks-rust": "shadowsocks-rust", "shadowtls": "ShadowTLS"}[key]
 }
 func runtimeSourceURL(key string) string {
 	return map[string]string{"snell": "https://kb.nssurge.com/surge-knowledge-base/zh/release-notes/snell", "shadowsocks-rust": "https://github.com/shadowsocks/shadowsocks-rust/releases", "shadowtls": "https://github.com/ihciah/shadow-tls/releases"}[key]

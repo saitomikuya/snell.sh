@@ -10,6 +10,8 @@ import (
 	"github.com/proxy-panel/proxy-panel/internal/database"
 	"github.com/proxy-panel/proxy-panel/internal/nodes"
 	secretstore "github.com/proxy-panel/proxy-panel/internal/secrets"
+	"github.com/proxy-panel/proxy-panel/internal/settings"
+	"github.com/proxy-panel/proxy-panel/internal/traffic"
 )
 
 func TestCreateAndRestore(t *testing.T) {
@@ -32,6 +34,14 @@ func TestCreateAndRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := New(store.DB, dir)
+	settingsStore := settings.New(store.DB)
+	trafficStore := traffic.New(store.DB)
+	if _, err = settingsStore.SetLogMaxMB(ctx, 24); err != nil {
+		t.Fatal(err)
+	}
+	if err = trafficStore.SetProjectQuota(ctx, 1000, 5); err != nil {
+		t.Fatal(err)
+	}
 	entry, err := service.Create(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -44,6 +54,12 @@ func TestCreateAndRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err = settingsStore.SetLogMaxMB(ctx, 5); err != nil {
+		t.Fatal(err)
+	}
+	if err = trafficStore.SetProjectQuota(ctx, 2000, 8); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = service.Restore(ctx, entry.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -53,6 +69,14 @@ func TestCreateAndRestore(t *testing.T) {
 	}
 	if node.Name != "Snell 主节点" {
 		t.Fatalf("restore did not recover node: %s", node.Name)
+	}
+	values, err := settingsStore.Get(ctx)
+	if err != nil || values.LogMaxMB != 24 {
+		t.Fatalf("restore did not recover log settings: %+v, %v", values, err)
+	}
+	project, err := trafficStore.Project(ctx)
+	if err != nil || project.QuotaBytes != 1000 || project.ResetDay != 5 {
+		t.Fatalf("restore did not recover project quota: %+v, %v", project, err)
 	}
 }
 

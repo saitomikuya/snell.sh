@@ -21,6 +21,7 @@ import (
 	"github.com/proxy-panel/proxy-panel/internal/nodes"
 	panelruntime "github.com/proxy-panel/proxy-panel/internal/runtime"
 	secretstore "github.com/proxy-panel/proxy-panel/internal/secrets"
+	"github.com/proxy-panel/proxy-panel/internal/settings"
 	"github.com/proxy-panel/proxy-panel/internal/traffic"
 )
 
@@ -148,6 +149,7 @@ func runAgent() error {
 	}
 	defer store.Close()
 	manager := agent.NewManager(cfg.DataDir, nodeStore, traffic.New(store.DB))
+	manager.SetSettingsStore(settings.New(store.DB))
 	if os.Getenv("PANEL_AUTO_INSTALL_RUNTIMES") != "0" {
 		installer, installErr := panelruntime.NewInstaller(cfg.DataDir)
 		if installErr != nil {

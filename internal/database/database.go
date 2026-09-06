@@ -64,8 +64,14 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return err
 		}
 		if _, err = tx.ExecContext(ctx, migration); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("migration %d: %w", version, err)
+			// Migration 5 adds a column to installations created by earlier
+			// versions. Two panel processes can race while upgrading; if the
+			// other process added the column first, the migration is already
+			// complete and can be recorded safely.
+			if !(version == 5 && strings.Contains(strings.ToLower(err.Error()), "duplicate column name")) {
+				tx.Rollback()
+				return fmt.Errorf("migration %d: %w", version, err)
+			}
 		}
 		// The web and runtime-agent processes can start at the same time. All
 		// migrations are idempotent, so tolerate the other process recording the

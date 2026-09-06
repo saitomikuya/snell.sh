@@ -58,3 +58,45 @@ func TestBillingPeriodUsesConfiguredResetDay(t *testing.T) {
 		t.Fatalf("unexpected new cycle: %s", got)
 	}
 }
+
+func TestProjectQuotaUsesIndependentPeriodAndPause(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(dir+"/db", 0755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := database.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store := New(db.DB)
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
+	if err = store.SetProjectQuota(ctx, 1000, 5); err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.SampleProject(ctx, 400, 600, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Firewall != "pause" || !result.Paused || result.TotalUpload != 400 || result.TotalDownload != 600 {
+		t.Fatalf("unexpected project result: %+v", result)
+	}
+	if err = store.SetProjectQuota(ctx, 2000, 5); err != nil {
+		t.Fatal(err)
+	}
+	result, err = store.SampleProject(ctx, 0, 0, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Firewall != "resume" || result.Paused {
+		t.Fatalf("raising the project quota should resume it: %+v", result)
+	}
+	if err = store.ResetProject(ctx); err != nil {
+		t.Fatal(err)
+	}
+	counter, err := store.Project(ctx)
+	if err != nil || counter.Paused || counter.UploadBytes != 0 || counter.DownloadBytes != 0 {
+		t.Fatalf("project reset failed: %+v, %v", counter, err)
+	}
+}

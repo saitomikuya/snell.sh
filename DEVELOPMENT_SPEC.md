@@ -78,7 +78,7 @@
 
 ### 4.3 默认网络拓扑
 
-- Snell 默认只监听 `127.0.0.1:6160`。
+- Snell 默认监听 `0.0.0.0:6160`，同时支持 TCP/UDP；仅作为 ShadowTLS TCP 后端时可手动收敛到回环地址。
 - ShadowTLS 默认公开监听 `0.0.0.0:8443/tcp` 并转发到 Snell。
 - SS-2022 默认创建一个原生 TCP+UDP 节点。
 - SS-2022 的 ShadowTLS 为可选功能，并在界面提示 ShadowTLS 前端主要处理 TCP。
@@ -264,9 +264,9 @@ services:
 - ID：`snell-main`。
 - 名称：`Snell 主节点`。
 - 版本：Snell v5 当前兼容稳定版本。
-- 后端地址：`127.0.0.1:6160`。
+- 监听：`0.0.0.0:6160/tcp+udp`。
 - PSK：16 字节安全随机数的 Base64 表示。
-- 原始端口不对公网开放。
+- 默认对公网监听；如果仅作为 ShadowTLS TCP 后端，可手动改为 `127.0.0.1`。
 - 期望状态：运行。
 
 ### 11.2 ShadowTLS 主节点
@@ -275,7 +275,7 @@ services:
 - 名称：`Snell ShadowTLS`。
 - 版本：ShadowTLS v3 当前兼容稳定版本。
 - 监听：`0.0.0.0:8443/tcp`。
-- 后端：`127.0.0.1:6160`。
+- 后端：Snell 节点的 `6160` 端口（ShadowTLS 会将通配公网地址映射到本机回环地址）。
 - SNI：`www.microsoft.com`。
 - 密码：安全随机生成。
 - `wildcard-sni`：关闭。

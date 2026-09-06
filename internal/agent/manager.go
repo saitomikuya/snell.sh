@@ -11,9 +11,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -21,6 +23,7 @@ import (
 	"github.com/proxy-panel/proxy-panel/internal/firewall"
 	"github.com/proxy-panel/proxy-panel/internal/nodes"
 	runtimelog "github.com/proxy-panel/proxy-panel/internal/runtime"
+	"github.com/proxy-panel/proxy-panel/internal/settings"
 	"github.com/proxy-panel/proxy-panel/internal/traffic"
 )
 
@@ -42,21 +45,34 @@ const (
 )
 
 type Manager struct {
-	mu        sync.Mutex
-	logMu     sync.Mutex
-	dataDir   string
-	nodes     *nodes.Store
-	traffic   *traffic.Store
-	processes map[string]*process
-	closed    bool
+	mu         sync.Mutex
+	logMu      sync.Mutex
+	dataDir    string
+	nodes      *nodes.Store
+	traffic    *traffic.Store
+	settings   *settings.Store
+	processes  map[string]*process
+	closed     bool
+	logLimit   atomic.Int64
+	logEnabled atomic.Bool
 }
 
 func NewManager(dataDir string, store *nodes.Store, trafficStores ...*traffic.Store) *Manager {
 	manager := &Manager{dataDir: dataDir, nodes: store, processes: map[string]*process{}}
+	manager.logLimit.Store(settings.DefaultLogMaxMB << 20)
+	manager.logEnabled.Store(true)
 	if len(trafficStores) > 0 {
 		manager.traffic = trafficStores[0]
 	}
 	return manager
+}
+
+func (m *Manager) SetSettingsStore(store *settings.Store) {
+	m.settings = store
+	if values, err := store.Get(context.Background()); err == nil {
+		m.logLimit.Store(int64(values.LogMaxMB) << 20)
+		m.logEnabled.Store(values.LogEnabled)
+	}
 }
 
 func (m *Manager) Apply(nodeID string) (Result, error) {
@@ -297,23 +313,49 @@ func (m *Manager) Logs(id string, tail int) (LogsResult, error) {
 		tail = 200
 	}
 	path := filepath.Join(m.dataDir, "logs", filepath.Base(id)+".log")
-	file, err := os.Open(path)
-	if os.IsNotExist(err) {
-		return LogsResult{Lines: []string{}}, nil
+	lines := make([]string, 0, tail)
+	var totalBytes int64
+	var updated time.Time
+	paths := make([]string, 0, maxNodeLogArchives+1)
+	for index := maxNodeLogArchives; index >= 1; index-- {
+		paths = append(paths, fmt.Sprintf("%s.%d", path, index))
 	}
-	if err != nil {
-		return LogsResult{}, err
-	}
-	defer file.Close()
-	var lines []string
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-		if len(lines) > tail {
-			lines = lines[1:]
+	paths = append(paths, path)
+	for _, current := range paths {
+		info, statErr := os.Stat(current)
+		if os.IsNotExist(statErr) {
+			continue
+		}
+		if statErr != nil {
+			return LogsResult{}, statErr
+		}
+		totalBytes += info.Size()
+		if info.ModTime().After(updated) {
+			updated = info.ModTime()
+		}
+		file, openErr := os.Open(current)
+		if openErr != nil {
+			return LogsResult{}, openErr
+		}
+		scanner := bufio.NewScanner(file)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+		for scanner.Scan() {
+			lines = append(lines, scanner.Text())
+			if len(lines) > tail {
+				lines = lines[1:]
+			}
+		}
+		scanErr := scanner.Err()
+		_ = file.Close()
+		if scanErr != nil {
+			return LogsResult{}, scanErr
 		}
 	}
-	return LogsResult{Lines: lines}, scanner.Err()
+	updatedAt := ""
+	if !updated.IsZero() {
+		updatedAt = updated.UTC().Format(time.RFC3339)
+	}
+	return LogsResult{Lines: lines, TotalBytes: totalBytes, UpdatedAt: updatedAt}, nil
 }
 func (m *Manager) Shutdown() {
 	m.mu.Lock()
@@ -383,6 +425,8 @@ func (m *Manager) SampleTraffic() error {
 	if err != nil {
 		return err
 	}
+	nodeResults := make(map[string]traffic.SampleResult, len(active))
+	var projectUpload, projectDownload int64
 	for id := range active {
 		value := raw[id]
 		result, sampleErr := m.traffic.Sample(context.Background(), id, value.UploadBytes, value.DownloadBytes, time.Now())
@@ -390,10 +434,9 @@ func (m *Manager) SampleTraffic() error {
 			problems = append(problems, fmt.Errorf("%s: %w", nodeByID[id].Name, sampleErr))
 			continue
 		}
-		node := nodeByID[id]
-		if blockErr := firewall.SetBlocked(id, node.ListenPort, nodeNetworks(node), result.Paused); blockErr != nil {
-			problems = append(problems, fmt.Errorf("%s: %w", node.Name, blockErr))
-		}
+		nodeResults[id] = result
+		projectUpload += result.DeltaUpload
+		projectDownload += result.DeltaDownload
 		if result.DeltaUpload > 0 || result.DeltaDownload > 0 {
 			m.appendLog(filepath.Join(m.dataDir, "logs", id+".log"), fmt.Sprintf("[流量活动] 本次上传 +%s，下载 +%s；周期累计上传 %s，下载 %s", humanBytes(result.DeltaUpload), humanBytes(result.DeltaDownload), humanBytes(result.TotalUpload), humanBytes(result.TotalDownload)))
 		}
@@ -403,7 +446,56 @@ func (m *Manager) SampleTraffic() error {
 			m.appendLog(filepath.Join(m.dataDir, "logs", id+".log"), "[流量限额] 新计费周期已开始，节点已自动恢复")
 		}
 	}
+	project, projectErr := m.traffic.SampleProject(context.Background(), projectUpload, projectDownload, time.Now())
+	if projectErr != nil {
+		problems = append(problems, fmt.Errorf("project traffic: %w", projectErr))
+	} else {
+		for id, node := range nodeByID {
+			result, sampled := nodeResults[id]
+			if !sampled {
+				if counter, counterErr := m.traffic.Get(context.Background(), id); counterErr == nil {
+					result.Paused = counter.Paused
+				}
+			}
+			if blockErr := firewall.SetBlocked(id, node.ListenPort, nodeNetworks(node), result.Paused || project.Paused); blockErr != nil {
+				problems = append(problems, fmt.Errorf("%s: %w", node.Name, blockErr))
+			}
+			if project.Firewall == "pause" {
+				m.appendLog(filepath.Join(m.dataDir, "logs", id+".log"), "[项目流量限额] 所有公网节点的总流量已达本周期限额，已自动暂停")
+			} else if project.Firewall == "resume" {
+				m.appendLog(filepath.Join(m.dataDir, "logs", id+".log"), "[项目流量限额] 新计费周期已开始，未单独暂停的节点已恢复")
+			}
+		}
+	}
 	return errors.Join(problems...)
+}
+
+// SetProjectBlocked reapplies the effective project + per-node policy to every
+// public listener. Per-node pauses remain in force when a project pause ends.
+func (m *Manager) SetProjectBlocked(blocked bool) (Result, error) {
+	list, err := m.nodes.List(context.Background())
+	if err != nil {
+		return Result{}, err
+	}
+	counters, err := m.traffic.List(context.Background())
+	if err != nil {
+		return Result{}, err
+	}
+	paused := make(map[string]bool, len(counters))
+	for _, counter := range counters {
+		paused[counter.NodeID] = counter.Paused
+	}
+	var problems []error
+	for _, node := range list {
+		if !isPublicListener(node.ListenHost) || node.DesiredState != "running" {
+			continue
+		}
+		if applyErr := firewall.SetBlocked(node.ID, node.ListenPort, nodeNetworks(node), blocked || paused[node.ID]); applyErr != nil {
+			problems = append(problems, fmt.Errorf("%s: %w", node.Name, applyErr))
+		}
+	}
+	err = errors.Join(problems...)
+	return Result{OK: err == nil, Message: "project traffic policy applied"}, err
 }
 
 func (m *Manager) binaryPath(node nodes.Node) string {
@@ -426,10 +518,17 @@ func (m *Manager) commandArgs(node nodes.Node, config string) ([]string, error) 
 			return nil, err
 		}
 		backendHost := backend.ListenHost
+		if backendHost == "" {
+			backendHost = nodes.DefaultListenHost
+		}
 		if backendHost == "0.0.0.0" || backendHost == "::" {
 			backendHost = "127.0.0.1"
 		}
-		args := []string{"--v3", "server", "--listen", net.JoinHostPort(node.ListenHost, strconv.Itoa(node.ListenPort)), "--server", net.JoinHostPort(backendHost, strconv.Itoa(backend.ListenPort)), "--tls", node.Config.SNI, "--password", secret}
+		listenHost := node.ListenHost
+		if listenHost == "" {
+			listenHost = nodes.DefaultListenHost
+		}
+		args := []string{"--v3", "server", "--listen", net.JoinHostPort(listenHost, strconv.Itoa(node.ListenPort)), "--server", net.JoinHostPort(backendHost, strconv.Itoa(backend.ListenPort)), "--tls", node.Config.SNI, "--password", secret}
 		if node.Config.TFO {
 			args = append([]string{"--fastopen"}, args...)
 		}
@@ -456,10 +555,17 @@ func (m *Manager) capture(path, source string, reader io.Reader) {
 	}
 }
 func (m *Manager) appendLog(path, line string) {
+	if !m.logEnabled.Load() {
+		return
+	}
 	m.logMu.Lock()
 	defer m.logMu.Unlock()
 	_ = os.MkdirAll(filepath.Dir(path), 0750)
-	if info, err := os.Stat(path); err == nil && info.Size() > maxNodeLogSize {
+	fileLimit := maxNodeLogSize
+	if globalLimit := m.logLimit.Load(); globalLimit > 0 && globalLimit/4 < fileLimit {
+		fileLimit = max(globalLimit/4, 64*1024)
+	}
+	if info, err := os.Stat(path); err == nil && info.Size() > fileLimit {
 		for i := maxNodeLogArchives - 1; i >= 1; i-- {
 			_ = os.Rename(fmt.Sprintf("%s.%d", path, i), fmt.Sprintf("%s.%d", path, i+1))
 		}
@@ -470,6 +576,64 @@ func (m *Manager) appendLog(path, line string) {
 		_, _ = fmt.Fprintln(file, time.Now().UTC().Format(time.RFC3339), strings.ReplaceAll(line, "\r", ""))
 		_ = file.Close()
 	}
+}
+
+// MaintainLogs enforces one configurable budget across every current and
+// archived node log, deleting the oldest files first.
+func (m *Manager) MaintainLogs() (LogMaintenanceResult, error) {
+	m.logMu.Lock()
+	defer m.logMu.Unlock()
+	limit := m.logLimit.Load()
+	if m.settings != nil {
+		values, err := m.settings.Get(context.Background())
+		if err != nil {
+			return LogMaintenanceResult{}, err
+		}
+		limit = int64(values.LogMaxMB) << 20
+		m.logLimit.Store(limit)
+		m.logEnabled.Store(values.LogEnabled)
+	}
+	type logFile struct {
+		path    string
+		size    int64
+		modTime time.Time
+	}
+	entries, err := os.ReadDir(filepath.Join(m.dataDir, "logs"))
+	if os.IsNotExist(err) {
+		return LogMaintenanceResult{OK: true, LimitBytes: limit}, nil
+	}
+	if err != nil {
+		return LogMaintenanceResult{}, err
+	}
+	files := make([]logFile, 0, len(entries))
+	var total int64
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			return LogMaintenanceResult{}, infoErr
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		total += info.Size()
+		files = append(files, logFile{path: filepath.Join(m.dataDir, "logs", entry.Name()), size: info.Size(), modTime: info.ModTime()})
+	}
+	sort.Slice(files, func(left, right int) bool { return files[left].modTime.Before(files[right].modTime) })
+	removed := 0
+	for _, file := range files {
+		if total <= limit {
+			break
+		}
+		if removeErr := os.Remove(file.path); removeErr != nil && !os.IsNotExist(removeErr) {
+			return LogMaintenanceResult{}, removeErr
+		}
+		total -= file.size
+		removed++
+	}
+	return LogMaintenanceResult{OK: true, LimitBytes: limit, CurrentBytes: total, RemovedFiles: removed}, nil
 }
 
 func isPublicListener(host string) bool {

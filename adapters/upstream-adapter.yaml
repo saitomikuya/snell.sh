@@ -1,11 +1,4 @@
 schema_version: 1
-repositories:
-  snell_scripts:
-    url: https://github.com/jinqians/snell.sh
-    supported_commit: 65b24cc51fa78a5482a96d6d965fd31b43f31809
-  ss_2022_scripts:
-    url: https://github.com/jinqians/ss-2022.sh
-    supported_commit: 89d5cf4cdd81bcbb54b4be05af9d1280489aa6e9
 runtimes:
   snell:
     source: https://dl.nssurge.com/snell/

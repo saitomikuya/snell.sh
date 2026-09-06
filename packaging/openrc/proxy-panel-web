@@ -1,0 +1,25 @@
+#!/sbin/openrc-run
+
+name="Proxy Panel web"
+description="Proxy Panel web and API service"
+supervisor=supervise-daemon
+command=/usr/local/bin/panel
+command_args=server
+command_user=panel:panel
+directory=/opt/proxy-panel
+umask=0007
+output_logger="/usr/bin/logger -t proxy-panel-web"
+error_logger="/usr/bin/logger -t proxy-panel-web"
+respawn_delay=5
+respawn_max=0
+respawn_period=60
+
+depend() {
+	need net
+	after nftables
+}
+
+start_pre() {
+	checkpath -d -m 2770 -o panel:panel /opt/proxy-panel
+}
+

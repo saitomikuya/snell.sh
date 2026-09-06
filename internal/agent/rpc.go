@@ -12,7 +12,11 @@ type Result struct {
 	Message      string
 	RestartCount int
 }
-type LogsResult struct{ Lines []string }
+type LogsResult struct {
+	Lines      []string `json:"lines"`
+	TotalBytes int64    `json:"totalBytes"`
+	UpdatedAt  string   `json:"updatedAt"`
+}
 type StatusResult struct{ Instances map[string]Result }
 type PortRequest struct {
 	Host    string
@@ -27,9 +31,22 @@ type BlockRequest struct {
 	NodeID  string
 	Blocked bool
 }
+type LogMaintenanceResult struct {
+	OK           bool
+	LimitBytes   int64
+	CurrentBytes int64
+	RemovedFiles int
+}
 type RuntimeInstallRequest struct {
 	Kind    string
 	Version string
+}
+type RuntimeUploadInstallRequest struct {
+	Kind     string
+	Version  string
+	Format   string
+	UploadID string
+	SHA256   string
 }
 type RuntimeInstallResult struct {
 	OK           bool

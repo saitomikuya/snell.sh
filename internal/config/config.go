@@ -37,7 +37,7 @@ func (c Config) InitDirectories() error {
 	directoryMode := os.FileMode(0770) | os.ModeSetgid
 	dirs := []string{
 		"db", "config/snell", "config/ss", "config/shadowtls", "runtime",
-		"upstream/manifests", "upstream/scripts", "upstream/checksums", "releases",
+		"upstream/manifests", "upstream/scripts", "upstream/checksums", "releases", "releases/uploads",
 		"backups", "logs", "traffic", "secrets",
 	}
 	for _, dir := range dirs {
@@ -54,11 +54,21 @@ func (c Config) InitDirectories() error {
 			return err
 		}
 	}
-	probe := filepath.Join(c.DataDir, ".write-test")
-	if err := os.WriteFile(probe, []byte("ok"), 0600); err != nil {
+	probe, err := os.CreateTemp(c.DataDir, ".write-test-*")
+	if err != nil {
 		return fmt.Errorf("data directory is not writable: %w", err)
 	}
-	return os.Remove(probe)
+	probePath := probe.Name()
+	if _, err = probe.WriteString("ok"); err != nil {
+		_ = probe.Close()
+		_ = os.Remove(probePath)
+		return fmt.Errorf("data directory is not writable: %w", err)
+	}
+	if err = probe.Close(); err != nil {
+		_ = os.Remove(probePath)
+		return fmt.Errorf("data directory is not writable: %w", err)
+	}
+	return os.Remove(probePath)
 }
 
 func env(key, fallback string) string {

@@ -199,6 +199,7 @@ func (s *Service) Restore(ctx context.Context, id string) (Entry, error) {
 	return preBackup, nil
 }
 func restoreDatabase(ctx context.Context, db *sql.DB, snapshot string) error {
+	var err error
 	if _, err := db.ExecContext(ctx, `ATTACH DATABASE ? AS restored`, snapshot); err != nil {
 		return err
 	}
@@ -207,18 +208,28 @@ func restoreDatabase(ctx context.Context, db *sql.DB, snapshot string) error {
 		return err
 	}
 	defer db.ExecContext(context.Background(), `PRAGMA foreign_keys=ON`)
+	tables := []string{"sessions", "traffic_samples", "node_configs", "config_revisions", "runtime_instances", "traffic_counters", "jobs", "audit_logs", "nodes", "secrets", "auth_state"}
+	inserts := []string{`INSERT INTO auth_state SELECT * FROM restored.auth_state`, `INSERT INTO secrets SELECT * FROM restored.secrets`, `INSERT INTO nodes SELECT * FROM restored.nodes ORDER BY backend_node_id IS NOT NULL`, `INSERT INTO node_configs SELECT * FROM restored.node_configs`, `INSERT INTO config_revisions SELECT * FROM restored.config_revisions`, `INSERT INTO runtime_instances SELECT * FROM restored.runtime_instances`, `INSERT INTO traffic_counters SELECT * FROM restored.traffic_counters`, `INSERT INTO jobs SELECT * FROM restored.jobs`, `INSERT INTO audit_logs SELECT * FROM restored.audit_logs`}
+	for _, optional := range []string{"project_traffic", "system_settings", "app_meta"} {
+		var found int
+		if err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM restored.sqlite_master WHERE type='table' AND name=?`, optional).Scan(&found); err != nil {
+			return err
+		}
+		if found > 0 {
+			tables = append(tables, optional)
+			inserts = append(inserts, `INSERT INTO `+optional+` SELECT * FROM restored.`+optional)
+		}
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	tables := []string{"sessions", "traffic_samples", "node_configs", "config_revisions", "runtime_instances", "traffic_counters", "jobs", "audit_logs", "nodes", "secrets", "auth_state"}
 	for _, table := range tables {
 		if _, err = tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return err
 		}
 	}
-	inserts := []string{`INSERT INTO auth_state SELECT * FROM restored.auth_state`, `INSERT INTO secrets SELECT * FROM restored.secrets`, `INSERT INTO nodes SELECT * FROM restored.nodes ORDER BY backend_node_id IS NOT NULL`, `INSERT INTO node_configs SELECT * FROM restored.node_configs`, `INSERT INTO config_revisions SELECT * FROM restored.config_revisions`, `INSERT INTO runtime_instances SELECT * FROM restored.runtime_instances`, `INSERT INTO traffic_counters SELECT * FROM restored.traffic_counters`, `INSERT INTO jobs SELECT * FROM restored.jobs`, `INSERT INTO audit_logs SELECT * FROM restored.audit_logs`}
 	for _, query := range inserts {
 		if _, err = tx.ExecContext(ctx, query); err != nil {
 			return err

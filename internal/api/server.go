@@ -4,10 +4,12 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"github.com/proxy-panel/proxy-panel/internal/database"
 	"github.com/proxy-panel/proxy-panel/internal/metrics"
 	"github.com/proxy-panel/proxy-panel/internal/nodes"
+	"github.com/proxy-panel/proxy-panel/internal/settings"
 	"github.com/proxy-panel/proxy-panel/internal/traffic"
 	"github.com/proxy-panel/proxy-panel/internal/updates"
 )
@@ -34,6 +37,7 @@ type Server struct {
 	traffic      *traffic.Store
 	backups      *backup.Service
 	updates      *updates.Service
+	settings     *settings.Store
 	limiter      *auth.Limiter
 	loginGate    chan struct{}
 	secureCookie bool
@@ -48,7 +52,7 @@ type contextKey string
 const sessionKey contextKey = "session"
 
 func New(store *database.Store, authService *auth.Service, nodeStore *nodes.Store, agentClient *agent.Client, secure bool, version string) *Server {
-	return &Server{store: store, auth: authService, nodes: nodeStore, agent: agentClient, traffic: traffic.New(store.DB), backups: backup.New(store.DB, store.DataDir), updates: updates.New(store.DB, store.DataDir, version), limiter: auth.NewLimiter(), loginGate: make(chan struct{}, 1), secureCookie: secure, version: version}
+	return &Server{store: store, auth: authService, nodes: nodeStore, agent: agentClient, traffic: traffic.New(store.DB), backups: backup.New(store.DB, store.DataDir), updates: updates.New(store.DB, store.DataDir, version), settings: settings.New(store.DB), limiter: auth.NewLimiter(), loginGate: make(chan struct{}, 1), secureCookie: secure, version: version}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -88,17 +92,25 @@ func (s *Server) Handler() http.Handler {
 					})
 				})
 				r.Get("/traffic", s.listTraffic)
+				r.Get("/traffic/project", s.projectTraffic)
+				r.Get("/settings", s.getSettings)
 				r.Group(func(r chi.Router) {
 					r.Use(s.requireCSRF)
 					r.Put("/traffic/{id}/quota", s.setQuota)
 					r.Post("/traffic/{id}/pause", s.pauseTraffic)
 					r.Post("/traffic/{id}/resume", s.resumeTraffic)
 					r.Post("/traffic/{id}/reset", s.resetTraffic)
+					r.Put("/traffic/project/quota", s.setProjectQuota)
+					r.Post("/traffic/project/pause", s.pauseProjectTraffic)
+					r.Post("/traffic/project/resume", s.resumeProjectTraffic)
+					r.Post("/traffic/project/reset", s.resetProjectTraffic)
+					r.Put("/settings/logs", s.updateLogSettings)
 					r.Post("/backups", s.createBackup)
 					r.Post("/backups/{id}/restore", s.restoreBackup)
 					r.Delete("/backups/{id}", s.deleteBackup)
 					r.Post("/updates/check", s.checkUpdates)
 					r.Post("/updates/apply", s.applyUpdate)
+					r.Post("/updates/upload", s.uploadUpdate)
 				})
 				r.Get("/backups", s.listBackups)
 				r.Get("/updates/status", s.updateStatus)
@@ -285,6 +297,9 @@ func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
+	if req.ListenHost == "" {
+		req.ListenHost = nodes.DefaultListenHost
+	}
 	for _, network := range nodeNetworks(req.Type, req.Config.Mode) {
 		if available, checkErr := s.agent.CheckPort(req.ListenHost, req.ListenPort, network); checkErr == nil && !available.Available {
 			writeError(w, 409, "PORT_CONFLICT", available.Message)
@@ -297,6 +312,9 @@ func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, rpcErr := s.agent.Apply(node.ID)
+	if rpcErr == nil {
+		_ = s.syncNodeTrafficPolicy(r.Context(), node.ID)
+	}
 	message := ""
 	if rpcErr != nil {
 		message = rpcErr.Error()
@@ -316,7 +334,16 @@ func (s *Server) updateNode(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	if old.ListenHost != req.ListenHost || old.ListenPort != req.ListenPort {
+	endpointChanged := old.ListenHost != req.ListenHost || old.ListenPort != req.ListenPort
+	var dependents []nodes.Node
+	if endpointChanged && old.Type != "shadowtls" {
+		dependents, err = s.dependentNodes(r.Context(), id)
+		if err != nil {
+			internal(w, err)
+			return
+		}
+	}
+	if endpointChanged {
 		for _, network := range nodeNetworks(old.Type, req.Config.Mode) {
 			if available, checkErr := s.agent.CheckPort(req.ListenHost, req.ListenPort, network); checkErr == nil && !available.Available {
 				writeError(w, 409, "PORT_CONFLICT", available.Message)
@@ -330,10 +357,26 @@ func (s *Server) updateNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, rpcErr := s.agent.Apply(id)
+	dependentApplyAttempted := false
+	if rpcErr == nil {
+		for _, dependent := range dependents {
+			dependentApplyAttempted = true
+			if _, applyErr := s.agent.Apply(dependent.ID); applyErr != nil {
+				rpcErr = fmt.Errorf("apply dependent node %s: %w", dependent.ID, applyErr)
+				break
+			}
+		}
+		_ = s.syncNodeTrafficPolicy(r.Context(), id)
+	}
 	if rpcErr != nil {
 		rollback := nodes.UpdateRequest{Name: old.Name, RuntimeVersion: old.RuntimeVersion, ListenHost: old.ListenHost, ListenPort: old.ListenPort, BackendNodeID: old.BackendNodeID, Config: old.Config, Secret: oldSecret}
 		_, _ = s.nodes.Update(r.Context(), id, rollback, "automatic-rollback")
 		_, _ = s.agent.Apply(id)
+		if dependentApplyAttempted {
+			for _, dependent := range dependents {
+				_, _ = s.agent.Apply(dependent.ID)
+			}
+		}
 		s.store.Audit(r.Context(), "node.update", "node", id, remoteIP(r), `{"rolledBack":true}`, false)
 		writeError(w, 409, "APPLY_ROLLED_BACK", rpcErr.Error())
 		return
@@ -341,11 +384,27 @@ func (s *Server) updateNode(w http.ResponseWriter, r *http.Request) {
 	s.store.Audit(r.Context(), "node.update", "node", id, remoteIP(r), auditJSON(map[string]any{"revision": node.Revision, "name": node.Name}), true)
 	writeJSON(w, 200, map[string]any{"node": node, "runtime": result})
 }
+
+func (s *Server) dependentNodes(ctx context.Context, backendID string) ([]nodes.Node, error) {
+	list, err := s.nodes.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]nodes.Node, 0)
+	for _, node := range list {
+		if node.BackendNodeID == backendID {
+			result = append(result, node)
+		}
+	}
+	return result, nil
+}
 func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	node, _ := s.nodes.Get(r.Context(), id)
+	_, _ = s.agent.SetBlocked(id, false)
 	_, _ = s.agent.Stop(id)
 	if err := s.nodes.Delete(r.Context(), id); err != nil {
+		_ = s.syncNodeTrafficPolicy(r.Context(), id)
 		writeError(w, 409, "DEPENDENCY_EXISTS", err.Error())
 		return
 	}
@@ -356,6 +415,9 @@ func (s *Server) validateNode(w http.ResponseWriter, r *http.Request) {
 	var req nodes.CreateRequest
 	if !decode(w, r, &req) {
 		return
+	}
+	if req.ListenHost == "" {
+		req.ListenHost = nodes.DefaultListenHost
 	}
 	if err := nodes.Validate(req); err != nil {
 		writeError(w, 400, "VALIDATION_FAILED", err.Error())
@@ -371,6 +433,7 @@ func (s *Server) applyNode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 409, "APPLY_FAILED", err.Error())
 		return
 	}
+	_ = s.syncNodeTrafficPolicy(r.Context(), id)
 	s.store.Audit(r.Context(), "node.apply", "node", id, remoteIP(r), "{}", true)
 	writeJSON(w, 200, result)
 }
@@ -400,18 +463,50 @@ func (s *Server) nodeAction(w http.ResponseWriter, r *http.Request, action strin
 		writeError(w, 409, "RUNTIME_FAILED", err.Error())
 		return
 	}
+	if action == "stop" {
+		_, _ = s.agent.SetBlocked(id, false)
+	} else {
+		_ = s.syncNodeTrafficPolicy(r.Context(), id)
+	}
 	s.store.Audit(r.Context(), "node."+action, "node", id, remoteIP(r), auditJSON(map[string]any{"name": node.Name}), true)
 	writeJSON(w, 200, result)
 }
+
+func (s *Server) syncNodeTrafficPolicy(ctx context.Context, id string) error {
+	node, err := s.nodes.Get(ctx, id)
+	if err != nil || node.ListenHost == "127.0.0.1" || node.ListenHost == "::1" {
+		return err
+	}
+	counter, err := s.traffic.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	project, err := s.traffic.Project(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = s.agent.SetBlocked(id, counter.Paused || project.Paused)
+	return err
+}
 func (s *Server) nodeLogs(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	node, _ := s.nodes.Get(r.Context(), id)
-	lines, err := s.agent.Logs(id, 200)
+	node, err := s.nodes.Get(r.Context(), id)
+	if err != nil {
+		notFound(w)
+		return
+	}
+	tail := 300
+	if raw := r.URL.Query().Get("tail"); raw != "" {
+		if value, parseErr := strconv.Atoi(raw); parseErr == nil && value >= 1 && value <= 1000 {
+			tail = value
+		}
+	}
+	lines, err := s.agent.Logs(id, tail)
 	if err != nil {
 		writeError(w, 503, "AGENT_UNAVAILABLE", err.Error())
 		return
 	}
-	s.store.Audit(r.Context(), "node.logs.view", "node", id, remoteIP(r), auditJSON(map[string]any{"name": node.Name, "tail": 200}), true)
+	s.store.Audit(r.Context(), "node.logs.view", "node", id, remoteIP(r), auditJSON(map[string]any{"name": node.Name, "tail": tail}), true)
 	writeJSON(w, 200, lines)
 }
 
@@ -453,6 +548,14 @@ func (s *Server) listTraffic(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, values)
 }
+func (s *Server) projectTraffic(w http.ResponseWriter, r *http.Request) {
+	value, err := s.traffic.Project(r.Context())
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	writeJSON(w, 200, value)
+}
 func (s *Server) setQuota(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		QuotaBytes int64 `json:"quotaBytes"`
@@ -472,11 +575,22 @@ func (s *Server) pauseTraffic(w http.ResponseWriter, r *http.Request)  { s.traff
 func (s *Server) resumeTraffic(w http.ResponseWriter, r *http.Request) { s.trafficAction(w, r, false) }
 func (s *Server) trafficAction(w http.ResponseWriter, r *http.Request, paused bool) {
 	id := chi.URLParam(r, "id")
-	if _, err := s.agent.SetBlocked(id, paused); err != nil {
+	old, err := s.traffic.Get(r.Context(), id)
+	if err != nil {
+		notFound(w)
+		return
+	}
+	project, err := s.traffic.Project(r.Context())
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	if _, err = s.agent.SetBlocked(id, paused || project.Paused); err != nil {
 		writeError(w, 503, "FIREWALL_FAILED", err.Error())
 		return
 	}
-	if err := s.traffic.Pause(r.Context(), id, paused); err != nil {
+	if err = s.traffic.Pause(r.Context(), id, paused); err != nil {
+		_, _ = s.agent.SetBlocked(id, old.Paused || project.Paused)
 		internal(w, err)
 		return
 	}
@@ -493,8 +607,125 @@ func (s *Server) resetTraffic(w http.ResponseWriter, r *http.Request) {
 		internal(w, err)
 		return
 	}
+	project, err := s.traffic.Project(r.Context())
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	if _, err = s.agent.SetBlocked(id, project.Paused); err != nil {
+		writeError(w, 503, "FIREWALL_FAILED", err.Error())
+		return
+	}
 	s.store.Audit(r.Context(), "traffic.reset", "node", id, remoteIP(r), "{}", true)
 	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (s *Server) setProjectQuota(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		QuotaBytes int64 `json:"quotaBytes"`
+		ResetDay   int   `json:"resetDay"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	if err := s.traffic.SetProjectQuota(r.Context(), body.QuotaBytes, body.ResetDay); err != nil {
+		writeError(w, 400, "VALIDATION_FAILED", err.Error())
+		return
+	}
+	result, err := s.traffic.SampleProject(r.Context(), 0, 0, time.Now())
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	if result.Firewall != "" {
+		if _, err = s.agent.SetProjectBlocked(result.Paused); err != nil {
+			writeError(w, 503, "FIREWALL_FAILED", err.Error())
+			return
+		}
+	}
+	s.store.Audit(r.Context(), "traffic.project.quota.update", "project", "all", remoteIP(r), auditJSON(map[string]any{"quotaBytes": body.QuotaBytes, "resetDay": body.ResetDay}), true)
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (s *Server) pauseProjectTraffic(w http.ResponseWriter, r *http.Request) {
+	s.projectTrafficAction(w, r, true)
+}
+func (s *Server) resumeProjectTraffic(w http.ResponseWriter, r *http.Request) {
+	s.projectTrafficAction(w, r, false)
+}
+func (s *Server) projectTrafficAction(w http.ResponseWriter, r *http.Request, paused bool) {
+	old, err := s.traffic.Project(r.Context())
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	if _, err = s.agent.SetProjectBlocked(paused); err != nil {
+		writeError(w, 503, "FIREWALL_FAILED", err.Error())
+		return
+	}
+	if err = s.traffic.PauseProject(r.Context(), paused); err != nil {
+		_, _ = s.agent.SetProjectBlocked(old.Paused)
+		internal(w, err)
+		return
+	}
+	action := "traffic.project.resume"
+	if paused {
+		action = "traffic.project.pause"
+	}
+	s.store.Audit(r.Context(), action, "project", "all", remoteIP(r), "{}", true)
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (s *Server) resetProjectTraffic(w http.ResponseWriter, r *http.Request) {
+	if err := s.traffic.ResetProject(r.Context()); err != nil {
+		internal(w, err)
+		return
+	}
+	if _, err := s.agent.SetProjectBlocked(false); err != nil {
+		writeError(w, 503, "FIREWALL_FAILED", err.Error())
+		return
+	}
+	s.store.Audit(r.Context(), "traffic.project.reset", "project", "all", remoteIP(r), "{}", true)
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
+	values, err := s.settings.Get(r.Context())
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	writeJSON(w, 200, values)
+}
+
+func (s *Server) updateLogSettings(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		LogMaxMB   int   `json:"logMaxMB"`
+		LogEnabled *bool `json:"logEnabled"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	current, err := s.settings.Get(r.Context())
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	if body.LogMaxMB == 0 {
+		body.LogMaxMB = current.LogMaxMB
+	}
+	enabled := current.LogEnabled
+	if body.LogEnabled != nil {
+		enabled = *body.LogEnabled
+	}
+	values, err := s.settings.SetLogs(r.Context(), body.LogMaxMB, enabled)
+	if err != nil {
+		writeError(w, 400, "VALIDATION_FAILED", err.Error())
+		return
+	}
+	maintenance, maintenanceErr := s.agent.MaintainLogs()
+	s.store.Audit(r.Context(), "settings.logs.update", "settings", "logs", remoteIP(r), auditJSON(map[string]any{"logMaxMB": values.LogMaxMB, "logEnabled": values.LogEnabled}), maintenanceErr == nil)
+	writeJSON(w, 200, map[string]any{"settings": values, "cleanup": maintenance, "cleanupPending": maintenanceErr != nil})
 }
 func (s *Server) createBackup(w http.ResponseWriter, r *http.Request) {
 	entry, err := s.backups.Create(r.Context())
@@ -604,43 +835,15 @@ func (s *Server) applyUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 409, "RUNTIME_INSTALL_FAILED", err.Error())
 		return
 	}
-	kind := body.Component
-	if kind == "shadowsocks-rust" {
-		kind = "ss2022"
-	}
-	list, err := s.nodes.List(r.Context())
+	nodesUpdated, err := s.applyRuntimeToNodes(r.Context(), body.Component, body.Version, "runtime-update")
 	if err != nil {
-		internal(w, err)
+		s.store.Audit(r.Context(), "update.apply", "update", body.Component, remoteIP(r), auditJSON(map[string]any{"version": body.Version, "backupId": entry.ID, "error": err.Error(), "rolledBack": true}), false)
+		writeError(w, 409, "RUNTIME_APPLY_ROLLED_BACK", err.Error())
 		return
 	}
-	type changedNode struct {
-		node nodes.Node
-	}
-	changed := make([]changedNode, 0)
-	for _, node := range list {
-		if node.Type != kind || node.RuntimeVersion == body.Version {
-			continue
-		}
-		req := nodes.UpdateRequest{Name: node.Name, RuntimeVersion: body.Version, ListenHost: node.ListenHost, ListenPort: node.ListenPort, BackendNodeID: node.BackendNodeID, Config: node.Config}
-		if _, err = s.nodes.Update(r.Context(), node.ID, req, "runtime-update"); err == nil {
-			_, err = s.agent.Apply(node.ID)
-		}
-		if err != nil {
-			for index := len(changed) - 1; index >= 0; index-- {
-				old := changed[index].node
-				rollback := nodes.UpdateRequest{Name: old.Name, RuntimeVersion: old.RuntimeVersion, ListenHost: old.ListenHost, ListenPort: old.ListenPort, BackendNodeID: old.BackendNodeID, Config: old.Config}
-				_, _ = s.nodes.Update(context.Background(), old.ID, rollback, "runtime-update-rollback")
-				_, _ = s.agent.Apply(old.ID)
-			}
-			s.store.Audit(r.Context(), "update.apply", "update", body.Component, remoteIP(r), auditJSON(map[string]any{"version": body.Version, "backupId": entry.ID, "error": err.Error(), "rolledBack": true}), false)
-			writeError(w, 409, "RUNTIME_APPLY_ROLLED_BACK", err.Error())
-			return
-		}
-		changed = append(changed, changedNode{node: node})
-	}
-	s.store.Audit(r.Context(), "update.apply", "update", body.Component, remoteIP(r), auditJSON(map[string]any{"version": body.Version, "backupId": entry.ID, "nodesUpdated": len(changed)}), true)
+	s.store.Audit(r.Context(), "update.apply", "update", body.Component, remoteIP(r), auditJSON(map[string]any{"version": body.Version, "backupId": entry.ID, "nodesUpdated": nodesUpdated}), true)
 	updated, _ := s.updates.Check(r.Context())
-	writeJSON(w, 200, map[string]any{"ok": true, "backup": entry, "nodesUpdated": len(changed), "status": updated})
+	writeJSON(w, 200, map[string]any{"ok": true, "backup": entry, "nodesUpdated": nodesUpdated, "status": updated})
 }
 func (s *Server) auditLogs(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.store.DB.QueryContext(r.Context(), `SELECT id,action,target_type,target_id,remote_ip,details,success,created_at FROM audit_logs ORDER BY id DESC LIMIT 200`)

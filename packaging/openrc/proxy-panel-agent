@@ -1,0 +1,32 @@
+#!/sbin/openrc-run
+
+name="Proxy Panel runtime agent"
+description="Privileged runtime and firewall agent for Proxy Panel"
+supervisor=supervise-daemon
+command=/usr/local/bin/panel
+command_args=agent
+directory=/opt/proxy-panel
+umask=0007
+output_logger="/usr/bin/logger -t proxy-panel-agent"
+error_logger="/usr/bin/logger -t proxy-panel-agent"
+respawn_delay=5
+respawn_max=0
+respawn_period=60
+
+depend() {
+	need net proxy-panel-web
+	after nftables
+}
+
+start_pre() {
+	local attempt=0
+	while [ ! -f /opt/proxy-panel/secrets/master.key ] && [ "$attempt" -lt 30 ]; do
+		sleep 1
+		attempt=$((attempt + 1))
+	done
+	if [ ! -f /opt/proxy-panel/secrets/master.key ]; then
+		eerror "Proxy Panel master key was not initialized"
+		return 1
+	fi
+}
+

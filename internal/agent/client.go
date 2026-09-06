@@ -29,6 +29,11 @@ func (c *Client) InstallRuntime(kind, version string) (RuntimeInstallResult, err
 	err := c.callWithTimeout("InstallRuntime", RuntimeInstallRequest{Kind: kind, Version: version}, &out, 3*time.Minute)
 	return out, err
 }
+func (c *Client) InstallUploadedRuntime(kind, version, format, uploadID, sha256 string) (RuntimeInstallResult, error) {
+	var out RuntimeInstallResult
+	err := c.callWithTimeout("InstallUploadedRuntime", RuntimeUploadInstallRequest{Kind: kind, Version: version, Format: format, UploadID: uploadID, SHA256: sha256}, &out, 3*time.Minute)
+	return out, err
+}
 func (c *Client) Apply(id string) (Result, error) {
 	var out Result
 	err := c.call("Apply", NodeRequest{NodeID: id}, &out)
@@ -67,6 +72,16 @@ func (c *Client) CheckPort(host string, port int, network string) (PortResult, e
 func (c *Client) SetBlocked(id string, blocked bool) (Result, error) {
 	var out Result
 	err := c.call("SetBlocked", BlockRequest{NodeID: id, Blocked: blocked}, &out)
+	return out, err
+}
+func (c *Client) SetProjectBlocked(blocked bool) (Result, error) {
+	var out Result
+	err := c.call("SetProjectBlocked", BlockRequest{Blocked: blocked}, &out)
+	return out, err
+}
+func (c *Client) MaintainLogs() (LogMaintenanceResult, error) {
+	var out LogMaintenanceResult
+	err := c.call("MaintainLogs", Empty{}, &out)
 	return out, err
 }
 func (c *Client) CleanupFirewall() (Result, error) {

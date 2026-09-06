@@ -35,3 +35,32 @@ func TestInitDirectoriesSetsSetgid(t *testing.T) {
 		t.Fatalf("directory mode %v does not include setgid", info.Mode())
 	}
 }
+
+func TestInitDirectoriesIsSafeToRunConcurrently(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{DataDir: dir}
+	const workers = 32
+	start := make(chan struct{})
+	errs := make(chan error, workers)
+
+	for range workers {
+		go func() {
+			<-start
+			errs <- cfg.InitDirectories()
+		}()
+	}
+	close(start)
+
+	for range workers {
+		if err := <-errs; err != nil {
+			t.Fatalf("InitDirectories() error = %v", err)
+		}
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, ".write-test-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("write probes were not removed: %v", matches)
+	}
+}

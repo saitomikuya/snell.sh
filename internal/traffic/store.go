@@ -22,8 +22,28 @@ type Counter struct {
 	UpdatedAt     string `json:"updatedAt"`
 }
 
+type ProjectCounter struct {
+	Period        string `json:"period"`
+	UploadBytes   int64  `json:"uploadBytes"`
+	DownloadBytes int64  `json:"downloadBytes"`
+	QuotaBytes    int64  `json:"quotaBytes"`
+	ResetDay      int    `json:"resetDay"`
+	Paused        bool   `json:"paused"`
+	PausedByQuota bool   `json:"pausedByQuota"`
+	UpdatedAt     string `json:"updatedAt"`
+}
+
 type SampleResult struct {
 	NodeID        string
+	DeltaUpload   int64
+	DeltaDownload int64
+	TotalUpload   int64
+	TotalDownload int64
+	Firewall      string // "pause", "resume", or empty
+	Paused        bool
+}
+
+type ProjectSampleResult struct {
 	DeltaUpload   int64
 	DeltaDownload int64
 	TotalUpload   int64
@@ -53,6 +73,20 @@ func (s *Store) List(ctx context.Context) ([]Counter, error) {
 	return out, rows.Err()
 }
 
+func (s *Store) Get(ctx context.Context, id string) (Counter, error) {
+	var counter Counter
+	err := s.db.QueryRowContext(ctx, `SELECT node_id,period,upload_bytes,download_bytes,quota_bytes,reset_day,paused,paused_by_quota,updated_at FROM traffic_counters WHERE node_id=?`, id).
+		Scan(&counter.NodeID, &counter.Period, &counter.UploadBytes, &counter.DownloadBytes, &counter.QuotaBytes, &counter.ResetDay, &counter.Paused, &counter.PausedByQuota, &counter.UpdatedAt)
+	return counter, err
+}
+
+func (s *Store) Project(ctx context.Context) (ProjectCounter, error) {
+	var counter ProjectCounter
+	err := s.db.QueryRowContext(ctx, `SELECT period,upload_bytes,download_bytes,quota_bytes,reset_day,paused,paused_by_quota,updated_at FROM project_traffic WHERE id=1`).
+		Scan(&counter.Period, &counter.UploadBytes, &counter.DownloadBytes, &counter.QuotaBytes, &counter.ResetDay, &counter.Paused, &counter.PausedByQuota, &counter.UpdatedAt)
+	return counter, err
+}
+
 func (s *Store) SetQuota(ctx context.Context, id string, quota int64, resetDay int) error {
 	if quota < 0 || resetDay < 1 || resetDay > 28 {
 		return errors.New("invalid quota or reset day")
@@ -64,8 +98,27 @@ func (s *Store) SetQuota(ctx context.Context, id string, quota int64, resetDay i
 	return requireRow(result)
 }
 
+func (s *Store) SetProjectQuota(ctx context.Context, quota int64, resetDay int) error {
+	if quota < 0 || resetDay < 1 || resetDay > 28 {
+		return errors.New("invalid quota or reset day")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE project_traffic SET quota_bytes=?,reset_day=?,updated_at=? WHERE id=1`, quota, resetDay, database.Now())
+	if err != nil {
+		return err
+	}
+	return requireRow(result)
+}
+
 func (s *Store) Pause(ctx context.Context, id string, paused bool) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE traffic_counters SET paused=?,paused_by_quota=0,updated_at=? WHERE node_id=?`, paused, database.Now(), id)
+	if err != nil {
+		return err
+	}
+	return requireRow(result)
+}
+
+func (s *Store) PauseProject(ctx context.Context, paused bool) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE project_traffic SET paused=?,paused_by_quota=0,updated_at=? WHERE id=1`, paused, database.Now())
 	if err != nil {
 		return err
 	}
@@ -95,6 +148,70 @@ func (s *Store) Reset(ctx context.Context, id string) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+func (s *Store) ResetProject(ctx context.Context) error {
+	var resetDay int
+	if err := s.db.QueryRowContext(ctx, `SELECT reset_day FROM project_traffic WHERE id=1`).Scan(&resetDay); err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE project_traffic SET period=?,upload_bytes=0,download_bytes=0,paused=0,paused_by_quota=0,updated_at=? WHERE id=1`, BillingPeriod(time.Now().UTC(), resetDay), database.Now())
+	if err != nil {
+		return err
+	}
+	return requireRow(result)
+}
+
+// SampleProject records the deltas already durably accepted by the per-node
+// sampler. Project billing has its own reset day and manual/quota pause state.
+func (s *Store) SampleProject(ctx context.Context, upload, download int64, now time.Time) (ProjectSampleResult, error) {
+	if upload < 0 || download < 0 {
+		return ProjectSampleResult{}, errors.New("project traffic deltas cannot be negative")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ProjectSampleResult{}, err
+	}
+	defer tx.Rollback()
+	var counter ProjectCounter
+	if err = tx.QueryRowContext(ctx, `SELECT period,upload_bytes,download_bytes,quota_bytes,reset_day,paused,paused_by_quota,updated_at FROM project_traffic WHERE id=1`).
+		Scan(&counter.Period, &counter.UploadBytes, &counter.DownloadBytes, &counter.QuotaBytes, &counter.ResetDay, &counter.Paused, &counter.PausedByQuota, &counter.UpdatedAt); err != nil {
+		return ProjectSampleResult{}, err
+	}
+	result := ProjectSampleResult{DeltaUpload: upload, DeltaDownload: download}
+	period := BillingPeriod(now, counter.ResetDay)
+	if counter.Period != period {
+		counter.Period = period
+		counter.UploadBytes = 0
+		counter.DownloadBytes = 0
+		if counter.PausedByQuota {
+			counter.Paused = false
+			counter.PausedByQuota = false
+			result.Firewall = "resume"
+		}
+	}
+	counter.UploadBytes += upload
+	counter.DownloadBytes += download
+	if counter.PausedByQuota && (counter.QuotaBytes == 0 || counter.UploadBytes+counter.DownloadBytes < counter.QuotaBytes) {
+		counter.Paused = false
+		counter.PausedByQuota = false
+		result.Firewall = "resume"
+	} else if counter.QuotaBytes > 0 && counter.UploadBytes+counter.DownloadBytes >= counter.QuotaBytes && !counter.Paused {
+		counter.Paused = true
+		counter.PausedByQuota = true
+		result.Firewall = "pause"
+	}
+	nowText := now.UTC().Format(time.RFC3339Nano)
+	if _, err = tx.ExecContext(ctx, `UPDATE project_traffic SET period=?,upload_bytes=?,download_bytes=?,paused=?,paused_by_quota=?,updated_at=? WHERE id=1`, counter.Period, counter.UploadBytes, counter.DownloadBytes, counter.Paused, counter.PausedByQuota, nowText); err != nil {
+		return ProjectSampleResult{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return ProjectSampleResult{}, err
+	}
+	result.TotalUpload = counter.UploadBytes
+	result.TotalDownload = counter.DownloadBytes
+	result.Paused = counter.Paused
+	return result, nil
 }
 
 // Sample persists only the delta from cumulative nftables counters. This keeps
@@ -146,7 +263,7 @@ func (s *Store) Sample(ctx context.Context, id string, rawUpload, rawDownload in
 		counter.DownloadBytes += result.DeltaDownload
 	}
 
-	if counter.QuotaBytes == 0 && counter.PausedByQuota {
+	if counter.PausedByQuota && (counter.QuotaBytes == 0 || counter.UploadBytes+counter.DownloadBytes < counter.QuotaBytes) {
 		counter.Paused = false
 		counter.PausedByQuota = false
 		result.Firewall = "resume"

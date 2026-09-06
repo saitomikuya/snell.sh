@@ -1,4 +1,5 @@
 # syntax=docker/dockerfile:1.7
+ARG BUILDPLATFORM=linux/amd64
 FROM --platform=$BUILDPLATFORM node:24.7.0-bookworm-slim AS web-build
 WORKDIR /src/web
 RUN corepack enable

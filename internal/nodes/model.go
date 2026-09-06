@@ -2,6 +2,12 @@ package nodes
 
 import "encoding/json"
 
+// DefaultListenHost is used whenever a caller omits a node listen address.
+// Wildcard binding keeps newly created proxy nodes reachable on both IPv4 and
+// IPv6-capable hosts; callers can still explicitly opt into a loopback bind
+// for a private ShadowTLS backend.
+const DefaultListenHost = "0.0.0.0"
+
 type Node struct {
 	ID             string `json:"id"`
 	Type           string `json:"type"`

@@ -7,6 +7,7 @@ import (
 	"net/rpc"
 	"os"
 	"path/filepath"
+	"regexp"
 	stdruntime "runtime"
 	"strconv"
 	"time"
@@ -16,6 +17,8 @@ import (
 )
 
 type RuntimeService struct{ Manager *Manager }
+
+var runtimeUploadIDPattern = regexp.MustCompile(`^runtime-upload-[0-9]+\.part$`)
 
 func (s *RuntimeService) Apply(req NodeRequest, out *Result) error {
 	if req.NodeID == "" {
@@ -97,6 +100,16 @@ func (s *RuntimeService) SetBlocked(req BlockRequest, out *Result) error {
 	out.Message = "firewall policy applied"
 	return nil
 }
+func (s *RuntimeService) SetProjectBlocked(req BlockRequest, out *Result) error {
+	value, err := s.Manager.SetProjectBlocked(req.Blocked)
+	*out = value
+	return err
+}
+func (s *RuntimeService) MaintainLogs(_ Empty, out *LogMaintenanceResult) error {
+	value, err := s.Manager.MaintainLogs()
+	*out = value
+	return err
+}
 func (s *RuntimeService) CleanupFirewall(_ Empty, out *Result) error {
 	err := firewall.Cleanup()
 	out.OK = err == nil
@@ -114,6 +127,26 @@ func (s *RuntimeService) InstallRuntime(req RuntimeInstallRequest, out *RuntimeI
 		return err
 	}
 	record, err := installer.Install(context.Background(), req.Kind, req.Version, stdruntime.GOARCH)
+	if err != nil {
+		return err
+	}
+	*out = RuntimeInstallResult{OK: true, Kind: record.Kind, Version: record.Version, Architecture: record.Architecture, InstalledAt: record.InstalledAt}
+	return nil
+}
+func (s *RuntimeService) InstallUploadedRuntime(req RuntimeUploadInstallRequest, out *RuntimeInstallResult) error {
+	if !runtimeUploadIDPattern.MatchString(req.UploadID) || filepath.Base(req.UploadID) != req.UploadID {
+		return errors.New("invalid runtime upload identifier")
+	}
+	if err := panelruntime.ValidateManualUpload(req.Kind, req.Version, req.Format, req.SHA256); err != nil {
+		return err
+	}
+	path := filepath.Join(s.Manager.dataDir, "releases", "uploads", req.UploadID)
+	defer os.Remove(path)
+	installer, err := panelruntime.NewInstaller(s.Manager.dataDir)
+	if err != nil {
+		return err
+	}
+	record, err := installer.InstallUploaded(context.Background(), req.Kind, req.Version, stdruntime.GOARCH, req.Format, path, req.SHA256)
 	if err != nil {
 		return err
 	}
@@ -147,6 +180,7 @@ func Serve(socket string, manager *Manager) error {
 	go func() {
 		manager.Reconcile()
 		_ = manager.SampleTraffic()
+		_, _ = manager.MaintainLogs()
 		// Thirty seconds is sufficiently responsive for quota enforcement while
 		// avoiding needless SQLite and log writes on very small VPS instances.
 		ticker := time.NewTicker(30 * time.Second)
@@ -157,6 +191,7 @@ func Serve(socket string, manager *Manager) error {
 			cycles++
 			if cycles%6 == 0 {
 				manager.Reconcile()
+				_, _ = manager.MaintainLogs()
 			}
 		}
 	}()

@@ -24,6 +24,12 @@ func NewStore(db *sql.DB, secrets *secretstore.Store) *Store { return &Store{db:
 
 func (s *Store) InitializeDefaults(ctx context.Context) error {
 	const marker = "default-shadowtls-ss-v1"
+	// Older images created the built-in Snell node as a loopback-only
+	// listener.  Keep the migration narrowly scoped to that built-in node so
+	// user-created ShadowTLS backends are not changed unexpectedly.
+	if err := s.migrateDefaultSnellListen(ctx); err != nil {
+		return err
+	}
 	var marked string
 	if err := s.db.QueryRowContext(ctx, `SELECT value FROM app_meta WHERE key=?`, marker).Scan(&marked); err == nil {
 		return nil
@@ -53,8 +59,10 @@ func (s *Store) InitializeDefaults(ctx context.Context) error {
 		req         CreateRequest
 		secretBytes int
 	}{
-		{"snell-main", CreateRequest{Type: "snell", Name: "Snell 主节点", RuntimeVersion: "v5.0.1", ListenHost: "127.0.0.1", ListenPort: 6160, Config: Config{Version: "v5", TFO: true}}, 16},
+		{"snell-main", CreateRequest{Type: "snell", Name: "Snell 主节点", RuntimeVersion: "v5.0.1", ListenHost: "0.0.0.0", ListenPort: 6160, Config: Config{Version: "v5", TFO: true}}, 16},
 		{"shadowtls-snell-main", CreateRequest{Type: "shadowtls", Name: "Snell ShadowTLS", RuntimeVersion: "v0.2.25", ListenHost: "0.0.0.0", ListenPort: 8443, BackendNodeID: "snell-main", Config: Config{Version: "v3", SNI: "www.microsoft.com", WildcardSNI: "off", TFO: true}}, 24},
+		// ShadowTLS only wraps TCP. The SS-2022 listener remains public so its
+		// UDP relay is reachable on the original SS port.
 		{"ss-main", CreateRequest{Type: "ss2022", Name: "SS-2022 主节点", RuntimeVersion: "v1.24.0", ListenHost: "0.0.0.0", ListenPort: ssPort, Config: Config{Mode: "tcp_and_udp", Method: "2022-blake3-aes-128-gcm", TFO: true}}, 16},
 		{"shadowtls-ss-main", CreateRequest{Type: "shadowtls", Name: "SS-2022 ShadowTLS", RuntimeVersion: "v0.2.25", ListenHost: "0.0.0.0", ListenPort: shadowSSPort, BackendNodeID: "ss-main", Config: Config{Version: "v3", SNI: "www.microsoft.com", WildcardSNI: "off", TFO: true}}, 24},
 	}
@@ -88,10 +96,59 @@ func (s *Store) InitializeDefaults(ctx context.Context) error {
 	return err
 }
 
+// migrateDefaultSnellListen updates only the legacy built-in Snell node.  A
+// fresh database gets the public default above, while an existing deployment
+// with the previous loopback default is made consistent after upgrading the
+// image.  If a user has already occupied the public port, leave their setup
+// untouched and retry on the next startup rather than failing panel startup.
+func (s *Store) migrateDefaultSnellListen(ctx context.Context) error {
+	const marker = "default-snell-public-listen-v1"
+	var applied string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM app_meta WHERE key=?`, marker).Scan(&applied)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
+	var host string
+	err = s.db.QueryRowContext(ctx, `SELECT listen_host FROM nodes WHERE id=? AND type='snell'`, "snell-main").Scan(&host)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// The default node may not exist yet; InitializeDefaults will create it
+		// with the new public listen address.
+	case err != nil:
+		return err
+	case host == "127.0.0.1":
+		if conflictErr := s.checkConflict(ctx, "snell-main", "snell", "0.0.0.0", 6160, ""); conflictErr != nil {
+			// A user may already be using the public port. Preserve that
+			// configuration and retry the migration on a later startup.
+			return nil
+		}
+		if _, err = s.db.ExecContext(ctx, `UPDATE nodes SET listen_host=?,updated_at=? WHERE id=?`, "0.0.0.0", database.Now(), "snell-main"); err != nil {
+			return err
+		}
+	}
+
+	_, err = s.db.ExecContext(ctx, `INSERT INTO app_meta(key,value,updated_at) VALUES(?,?,?)`, marker, "complete", database.Now())
+	if err != nil {
+		// Another panel process may have completed this idempotent migration.
+		var existing string
+		if scanErr := s.db.QueryRowContext(ctx, `SELECT value FROM app_meta WHERE key=?`, marker).Scan(&existing); scanErr == nil {
+			return nil
+		}
+	}
+	return err
+}
+
 func (s *Store) Create(ctx context.Context, req CreateRequest, source string) (Node, error) {
 	return s.createWithID(ctx, uuid.NewString(), req, source)
 }
 func (s *Store) createWithID(ctx context.Context, id string, req CreateRequest, source string) (Node, error) {
+	if req.ListenHost == "" {
+		req.ListenHost = DefaultListenHost
+	}
 	if err := Validate(req); err != nil {
 		return Node{}, err
 	}

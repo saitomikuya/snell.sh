@@ -13,11 +13,12 @@ import (
 	"github.com/proxy-panel/proxy-panel/internal/database"
 	"github.com/proxy-panel/proxy-panel/internal/nodes"
 	secretstore "github.com/proxy-panel/proxy-panel/internal/secrets"
+	"github.com/proxy-panel/proxy-panel/internal/settings"
 )
 
 func TestAppendLogKeepsBoundedArchives(t *testing.T) {
 	dir := t.TempDir()
-	manager := &Manager{}
+	manager := NewManager(dir, nil)
 	path := filepath.Join(dir, "node.log")
 	line := strings.Repeat("x", int(maxNodeLogSize))
 	for range 4 {
@@ -30,6 +31,84 @@ func TestAppendLogKeepsBoundedArchives(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "node.log.3")); !os.IsNotExist(err) {
 		t.Fatalf("unexpected extra log archive: %v", err)
+	}
+}
+
+func TestAppendLogCanBeDisabled(t *testing.T) {
+	dir := t.TempDir()
+	if err := (config.Config{DataDir: dir}).InitDirectories(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := database.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	settingsStore := settings.New(db.DB)
+	if _, err = settingsStore.SetLogs(context.Background(), settings.DefaultLogMaxMB, false); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(dir, nil)
+	manager.SetSettingsStore(settingsStore)
+	path := filepath.Join(dir, "logs", "node.log")
+	manager.appendLog(path, "should not be persisted")
+	if _, err = os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("node log was written while logging was disabled: %v", err)
+	}
+}
+
+func TestLogsReturnsAnEmptyJSONArrayForNewNode(t *testing.T) {
+	manager := NewManager(t.TempDir(), nil)
+	result, err := manager.Logs("new-node", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Lines == nil || len(result.Lines) != 0 {
+		t.Fatalf("expected a non-nil empty log list, got %#v", result.Lines)
+	}
+}
+
+func TestMaintainLogsDeletesOldestFilesToGlobalLimit(t *testing.T) {
+	dir := t.TempDir()
+	if err := (config.Config{DataDir: dir}).InitDirectories(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := database.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	settingsStore := settings.New(db.DB)
+	if _, err = settingsStore.SetLogMaxMB(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := filepath.Join(dir, "logs", "old.log.1")
+	newPath := filepath.Join(dir, "logs", "new.log")
+	content := []byte(strings.Repeat("x", 700*1024))
+	if err = os.WriteFile(oldPath, content, 0640); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-time.Hour)
+	if err = os.Chtimes(oldPath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(newPath, content, 0640); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(dir, nil)
+	manager.SetSettingsStore(settingsStore)
+	result, err := manager.MaintainLogs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RemovedFiles != 1 || result.CurrentBytes > result.LimitBytes {
+		t.Fatalf("unexpected cleanup result: %+v", result)
+	}
+	if _, err = os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("oldest log was not removed: %v", err)
+	}
+	if _, err = os.Stat(newPath); err != nil {
+		t.Fatalf("newer log should remain: %v", err)
 	}
 }
 
