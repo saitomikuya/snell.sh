@@ -27,38 +27,64 @@ type Node struct {
 }
 
 type Config struct {
-	Version       string `json:"version,omitempty"`
-	DNS           string `json:"dns,omitempty"`
-	IPv6          bool   `json:"ipv6,omitempty"`
-	TFO           bool   `json:"tfo,omitempty"`
-	Public        bool   `json:"public,omitempty"`
-	Mode          string `json:"mode,omitempty"`
-	Method        string `json:"method,omitempty"`
-	Obfs          string `json:"obfs,omitempty"`
-	ObfsHost      string `json:"obfsHost,omitempty"`
-	BlockMainland bool   `json:"blockMainland,omitempty"`
-	SNI           string `json:"sni,omitempty"`
-	WildcardSNI   string `json:"wildcardSni,omitempty"`
+	Version                 string `json:"version,omitempty"`
+	DNS                     string `json:"dns,omitempty"`
+	IPv6                    bool   `json:"ipv6,omitempty"`
+	TFO                     bool   `json:"tfo,omitempty"`
+	Public                  bool   `json:"public,omitempty"`
+	Mode                    string `json:"mode,omitempty"`
+	Method                  string `json:"method,omitempty"`
+	Obfs                    string `json:"obfs,omitempty"`
+	ObfsHost                string `json:"obfsHost,omitempty"`
+	BlockMainland           bool   `json:"blockMainland,omitempty"`
+	SNI                     string `json:"sni,omitempty"`
+	WildcardSNI             string `json:"wildcardSni,omitempty"`
+	UDPEnabled              bool   `json:"udpEnabled,omitempty"`
+	ServerName              string `json:"serverName,omitempty"`
+	VPNNetwork              string `json:"vpnNetwork,omitempty"`
+	MTU                     int    `json:"mtu,omitempty"`
+	MaxClients              int    `json:"maxClients,omitempty"`
+	MaxSameClients          int    `json:"maxSameClients,omitempty"`
+	CertificateURL          string `json:"certificateUrl,omitempty"`
+	PrivateKeyURL           string `json:"privateKeyUrl,omitempty"`
+	CertificateUsername     string `json:"certificateUsername,omitempty"`
+	CertificateSchedule     string `json:"certificateSchedule,omitempty"`
+	CertificateScheduleDay  int    `json:"certificateScheduleDay,omitempty"`
+	CertificateScheduleTime string `json:"certificateScheduleTime,omitempty"`
+	ChinaCIDRSourceURL      string `json:"chinaCidrSourceUrl,omitempty"`
+	ChinaCIDRSourceFormat   string `json:"chinaCidrSourceFormat,omitempty"`
+	ChinaCIDRSchedule       string `json:"chinaCidrSchedule,omitempty"`
+	ChinaCIDRScheduleDay    int    `json:"chinaCidrScheduleDay,omitempty"`
+	ChinaCIDRScheduleTime   string `json:"chinaCidrScheduleTime,omitempty"`
 }
 
 type CreateRequest struct {
-	Type           string `json:"type"`
-	Name           string `json:"name"`
-	RuntimeVersion string `json:"runtimeVersion"`
-	ListenHost     string `json:"listenHost"`
-	ListenPort     int    `json:"listenPort"`
-	BackendNodeID  string `json:"backendNodeId,omitempty"`
-	Config         Config `json:"config"`
-	Secret         string `json:"secret,omitempty"`
+	Type                 string `json:"type"`
+	Name                 string `json:"name"`
+	RuntimeVersion       string `json:"runtimeVersion"`
+	ListenHost           string `json:"listenHost"`
+	ListenPort           int    `json:"listenPort"`
+	BackendNodeID        string `json:"backendNodeId,omitempty"`
+	Config               Config `json:"config"`
+	Secret               string `json:"secret,omitempty"`
+	CertificatePassword  string `json:"certificatePassword,omitempty"`
+	PrivateKeyPassphrase string `json:"privateKeyPassphrase,omitempty"`
 }
 type UpdateRequest struct {
-	Name           string `json:"name"`
-	RuntimeVersion string `json:"runtimeVersion"`
-	ListenHost     string `json:"listenHost"`
-	ListenPort     int    `json:"listenPort"`
-	BackendNodeID  string `json:"backendNodeId,omitempty"`
-	Config         Config `json:"config"`
-	Secret         string `json:"secret,omitempty"`
+	Name                 string `json:"name"`
+	RuntimeVersion       string `json:"runtimeVersion"`
+	ListenHost           string `json:"listenHost"`
+	ListenPort           int    `json:"listenPort"`
+	BackendNodeID        string `json:"backendNodeId,omitempty"`
+	Config               Config `json:"config"`
+	Secret               string `json:"secret,omitempty"`
+	CertificatePassword  string `json:"certificatePassword,omitempty"`
+	PrivateKeyPassphrase string `json:"privateKeyPassphrase,omitempty"`
+}
+
+type AnyConnectSecrets struct {
+	CertificatePassword  string `json:"certificatePassword"`
+	PrivateKeyPassphrase string `json:"privateKeyPassphrase"`
 }
 
 func ConfigJSON(c Config) string { b, _ := json.Marshal(c); return string(b) }

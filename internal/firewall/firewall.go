@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -115,6 +116,58 @@ func RemoveAccounting(nodeID string) error {
 	}
 	prefix := "proxy-panel:" + nodeID + ":traffic:"
 	for _, chain := range []string{"input", "output"} {
+		rules, err := listTagged(chain, prefix)
+		if err != nil {
+			return err
+		}
+		for _, rule := range rules {
+			if err = deleteHandle(chain, rule.Handle); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// EnsureVPN adds only rules owned by this project. It does not change global
+// forwarding sysctls, default policies, UFW/firewalld state, or Docker chains.
+func EnsureVPN(nodeID, network string) error {
+	nftMu.Lock()
+	defer nftMu.Unlock()
+	if nodeID == "" || strings.ContainsAny(nodeID, ":\r\n") {
+		return errors.New("invalid node id")
+	}
+	if _, err := netip.ParsePrefix(network); err != nil {
+		return errors.New("invalid VPN network")
+	}
+	if err := ensureVPN(); err != nil {
+		return err
+	}
+	prefix := "proxy-panel:" + nodeID + ":vpn:"
+	desiredForward := map[string][]string{
+		prefix + "out": {"add", "rule", "inet", TableName, "forward", "ip", "saddr", network, "counter", "accept", "comment", quote(prefix + "out")},
+		prefix + "in":  {"add", "rule", "inet", TableName, "forward", "ip", "daddr", network, "ct", "state", "established,related", "counter", "accept", "comment", quote(prefix + "in")},
+	}
+	if err := syncTagged("forward", prefix, desiredForward); err != nil {
+		return err
+	}
+	desiredNAT := map[string][]string{
+		prefix + "nat": {"add", "rule", "inet", TableName, "postrouting", "ip", "saddr", network, "counter", "masquerade", "comment", quote(prefix + "nat")},
+	}
+	return syncTagged("postrouting", prefix, desiredNAT)
+}
+
+func RemoveVPN(nodeID string) error {
+	nftMu.Lock()
+	defer nftMu.Unlock()
+	if nodeID == "" || strings.ContainsAny(nodeID, ":\r\n") {
+		return errors.New("invalid node id")
+	}
+	if err := ensureVPN(); err != nil {
+		return err
+	}
+	prefix := "proxy-panel:" + nodeID + ":vpn:"
+	for _, chain := range []string{"forward", "postrouting"} {
 		rules, err := listTagged(chain, prefix)
 		if err != nil {
 			return err
@@ -247,6 +300,22 @@ func ensure() error {
 	}
 	for _, chain := range []string{"input", "output"} {
 		args := []string{"add", "chain", "inet", TableName, chain, "{", "type", "filter", "hook", chain, "priority", "-5", ";", "policy", "accept", ";", "}"}
+		if err := run(args...); err != nil && !strings.Contains(err.Error(), "File exists") {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureVPN() error {
+	if err := ensure(); err != nil {
+		return err
+	}
+	chains := [][]string{
+		{"add", "chain", "inet", TableName, "forward", "{", "type", "filter", "hook", "forward", "priority", "-5", ";", "policy", "accept", ";", "}"},
+		{"add", "chain", "inet", TableName, "postrouting", "{", "type", "nat", "hook", "postrouting", "priority", "srcnat", ";", "policy", "accept", ";", "}"},
+	}
+	for _, args := range chains {
 		if err := run(args...); err != nil && !strings.Contains(err.Error(), "File exists") {
 			return err
 		}

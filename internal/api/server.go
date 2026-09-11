@@ -80,6 +80,8 @@ func (s *Server) Handler() http.Handler {
 					r.Get("/", s.getNode)
 					r.Get("/client-configs", s.clientConfigs)
 					r.Get("/logs", s.nodeLogs)
+					r.Get("/anyconnect/users", s.listAnyConnectUsers)
+					r.Get("/anyconnect/assets", s.anyConnectAssets)
 					r.Group(func(r chi.Router) {
 						r.Use(s.requireCSRF)
 						r.Put("/", s.updateNode)
@@ -89,6 +91,10 @@ func (s *Server) Handler() http.Handler {
 						r.Post("/start", s.startNode)
 						r.Post("/stop", s.stopNode)
 						r.Post("/restart", s.restartNode)
+						r.Post("/anyconnect/users", s.createAnyConnectUser)
+						r.Put("/anyconnect/users/{userID}", s.updateAnyConnectUser)
+						r.Delete("/anyconnect/users/{userID}", s.deleteAnyConnectUser)
+						r.Post("/anyconnect/assets/{kind}/refresh", s.refreshAnyConnectAsset)
 					})
 				})
 				r.Get("/traffic", s.listTraffic)
@@ -300,7 +306,7 @@ func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {
 	if req.ListenHost == "" {
 		req.ListenHost = nodes.DefaultListenHost
 	}
-	for _, network := range nodeNetworks(req.Type, req.Config.Mode) {
+	for _, network := range nodeNetworks(req.Type, req.Config) {
 		if available, checkErr := s.agent.CheckPort(req.ListenHost, req.ListenPort, network); checkErr == nil && !available.Available {
 			writeError(w, 409, "PORT_CONFLICT", available.Message)
 			return
@@ -344,7 +350,7 @@ func (s *Server) updateNode(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if endpointChanged {
-		for _, network := range nodeNetworks(old.Type, req.Config.Mode) {
+		for _, network := range nodeNetworks(old.Type, req.Config) {
 			if available, checkErr := s.agent.CheckPort(req.ListenHost, req.ListenPort, network); checkErr == nil && !available.Available {
 				writeError(w, 409, "PORT_CONFLICT", available.Message)
 				return
@@ -356,7 +362,15 @@ func (s *Server) updateNode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "VALIDATION_FAILED", err.Error())
 		return
 	}
-	result, rpcErr := s.agent.Apply(id)
+	var result agent.Result
+	var rpcErr error
+	certificateChanged := old.Type == "anyconnect" && (old.Config.ServerName != node.Config.ServerName || old.Config.CertificateURL != node.Config.CertificateURL || old.Config.PrivateKeyURL != node.Config.PrivateKeyURL || old.Config.CertificateUsername != node.Config.CertificateUsername || req.CertificatePassword != "" || req.PrivateKeyPassphrase != "")
+	if certificateChanged {
+		_, rpcErr = s.agent.RefreshAnyConnectAsset(id, "certificate")
+	}
+	if rpcErr == nil {
+		result, rpcErr = s.agent.Apply(id)
+	}
 	dependentApplyAttempted := false
 	if rpcErr == nil {
 		for _, dependent := range dependents {
@@ -371,6 +385,9 @@ func (s *Server) updateNode(w http.ResponseWriter, r *http.Request) {
 	if rpcErr != nil {
 		rollback := nodes.UpdateRequest{Name: old.Name, RuntimeVersion: old.RuntimeVersion, ListenHost: old.ListenHost, ListenPort: old.ListenPort, BackendNodeID: old.BackendNodeID, Config: old.Config, Secret: oldSecret}
 		_, _ = s.nodes.Update(r.Context(), id, rollback, "automatic-rollback")
+		if certificateChanged {
+			_, _ = s.agent.RefreshAnyConnectAsset(id, "certificate")
+		}
 		_, _ = s.agent.Apply(id)
 		if dependentApplyAttempted {
 			for _, dependent := range dependents {
@@ -403,6 +420,9 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request) {
 	node, _ := s.nodes.Get(r.Context(), id)
 	_, _ = s.agent.SetBlocked(id, false)
 	_, _ = s.agent.Stop(id)
+	if node.Type == "anyconnect" {
+		_, _ = s.agent.RemoveAnyConnect(id)
+	}
 	if err := s.nodes.Delete(r.Context(), id); err != nil {
 		_ = s.syncNodeTrafficPolicy(r.Context(), id)
 		writeError(w, 409, "DEPENDENCY_EXISTS", err.Error())
@@ -517,7 +537,10 @@ func (s *Server) clientConfigs(w http.ResponseWriter, r *http.Request) {
 		notFound(w)
 		return
 	}
-	secret, _ := s.nodes.Secret(r.Context(), id)
+	secret := ""
+	if node.Type != "anyconnect" {
+		secret, _ = s.nodes.Secret(r.Context(), id)
+	}
 	var backend *nodes.Node
 	backendSecret := ""
 	if node.BackendNodeID != "" {
@@ -538,6 +561,131 @@ func (s *Server) clientConfigs(w http.ResponseWriter, r *http.Request) {
 	}
 	s.store.Audit(r.Context(), "node.client_config.view", "node", id, remoteIP(r), auditJSON(map[string]any{"name": node.Name, "protocol": node.Type}), true)
 	writeJSON(w, 200, cfg)
+}
+
+func (s *Server) listAnyConnectUsers(w http.ResponseWriter, r *http.Request) {
+	users, err := s.nodes.ListAnyConnectUsers(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, 400, "NOT_ANYCONNECT", err.Error())
+		return
+	}
+	writeJSON(w, 200, users)
+}
+
+func (s *Server) createAnyConnectUser(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "id")
+	var req nodes.AnyConnectUserRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	user, err := s.nodes.CreateAnyConnectUser(r.Context(), nodeID, req)
+	if err != nil {
+		writeError(w, 400, "VALIDATION_FAILED", err.Error())
+		return
+	}
+	if _, err = s.agent.Apply(nodeID); err != nil {
+		_ = s.nodes.DeleteAnyConnectUser(r.Context(), nodeID, user.ID)
+		_, _ = s.agent.Apply(nodeID)
+		writeError(w, 409, "APPLY_ROLLED_BACK", err.Error())
+		return
+	}
+	s.store.Audit(r.Context(), "anyconnect.user.create", "node", nodeID, remoteIP(r), auditJSON(map[string]any{"username": user.Username, "routeGroup": user.RouteGroup}), true)
+	writeJSON(w, 201, user)
+}
+
+func (s *Server) updateAnyConnectUser(w http.ResponseWriter, r *http.Request) {
+	nodeID, userID := chi.URLParam(r, "id"), chi.URLParam(r, "userID")
+	old, err := s.nodes.GetAnyConnectUser(r.Context(), nodeID, userID)
+	if err != nil {
+		notFound(w)
+		return
+	}
+	oldPassword, err := s.nodes.AnyConnectUserPassword(r.Context(), userID)
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	var req nodes.AnyConnectUserRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	user, err := s.nodes.UpdateAnyConnectUser(r.Context(), nodeID, userID, req)
+	if err != nil {
+		writeError(w, 400, "VALIDATION_FAILED", err.Error())
+		return
+	}
+	if _, err = s.agent.Apply(nodeID); err != nil {
+		_, _ = s.nodes.UpdateAnyConnectUser(r.Context(), nodeID, userID, nodes.AnyConnectUserRequest{Username: old.Username, Password: oldPassword, RouteGroup: old.RouteGroup, Enabled: old.Enabled})
+		_, _ = s.agent.Apply(nodeID)
+		writeError(w, 409, "APPLY_ROLLED_BACK", err.Error())
+		return
+	}
+	s.store.Audit(r.Context(), "anyconnect.user.update", "node", nodeID, remoteIP(r), auditJSON(map[string]any{"username": user.Username, "routeGroup": user.RouteGroup, "enabled": user.Enabled}), true)
+	writeJSON(w, 200, user)
+}
+
+func (s *Server) deleteAnyConnectUser(w http.ResponseWriter, r *http.Request) {
+	nodeID, userID := chi.URLParam(r, "id"), chi.URLParam(r, "userID")
+	old, err := s.nodes.GetAnyConnectUser(r.Context(), nodeID, userID)
+	if err != nil {
+		notFound(w)
+		return
+	}
+	oldPassword, err := s.nodes.AnyConnectUserPassword(r.Context(), userID)
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	if err = s.nodes.DeleteAnyConnectUser(r.Context(), nodeID, userID); err != nil {
+		internal(w, err)
+		return
+	}
+	if _, err = s.agent.Apply(nodeID); err != nil {
+		_, _ = s.nodes.CreateAnyConnectUser(r.Context(), nodeID, nodes.AnyConnectUserRequest{Username: old.Username, Password: oldPassword, RouteGroup: old.RouteGroup, Enabled: old.Enabled})
+		_, _ = s.agent.Apply(nodeID)
+		writeError(w, 409, "APPLY_ROLLED_BACK", err.Error())
+		return
+	}
+	s.store.Audit(r.Context(), "anyconnect.user.delete", "node", nodeID, remoteIP(r), auditJSON(map[string]any{"username": old.Username}), true)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) anyConnectAssets(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "id")
+	node, err := s.nodes.Get(r.Context(), nodeID)
+	if err != nil {
+		notFound(w)
+		return
+	}
+	if node.Type != "anyconnect" {
+		writeError(w, 400, "NOT_ANYCONNECT", "节点不是 AnyConnect 类型")
+		return
+	}
+	state, err := s.nodes.GetAnyConnectAssetState(r.Context(), nodeID)
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	writeJSON(w, 200, state)
+}
+
+func (s *Server) refreshAnyConnectAsset(w http.ResponseWriter, r *http.Request) {
+	nodeID, kind := chi.URLParam(r, "id"), chi.URLParam(r, "kind")
+	if kind != "certificate" && kind != "cidr" {
+		writeError(w, 400, "INVALID_ASSET", "只能刷新 certificate 或 cidr")
+		return
+	}
+	result, err := s.agent.RefreshAnyConnectAsset(nodeID, kind)
+	if err == nil {
+		_, err = s.agent.Apply(nodeID)
+	}
+	if err != nil {
+		s.store.Audit(r.Context(), "anyconnect.asset.refresh", "node", nodeID, remoteIP(r), auditJSON(map[string]any{"kind": kind, "error": err.Error()}), false)
+		writeError(w, 409, "ASSET_REFRESH_FAILED", err.Error())
+		return
+	}
+	s.store.Audit(r.Context(), "anyconnect.asset.refresh", "node", nodeID, remoteIP(r), auditJSON(map[string]any{"kind": kind, "changed": result.Changed}), true)
+	writeJSON(w, 200, result)
 }
 
 func (s *Server) listTraffic(w http.ResponseWriter, r *http.Request) {
@@ -759,7 +907,7 @@ func (s *Server) restoreBackup(w http.ResponseWriter, r *http.Request) {
 		internal(w, err)
 		return
 	}
-	for _, kind := range []string{"shadowtls", "snell", "ss2022"} {
+	for _, kind := range []string{"shadowtls", "anyconnect", "snell", "ss2022"} {
 		for _, node := range list {
 			if node.Type == kind {
 				_, _ = s.agent.Stop(node.ID)
@@ -772,7 +920,7 @@ func (s *Server) restoreBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	restored, _ := s.nodes.List(r.Context())
-	for _, kind := range []string{"snell", "ss2022", "shadowtls"} {
+	for _, kind := range []string{"snell", "ss2022", "anyconnect", "shadowtls"} {
 		for _, node := range restored {
 			if node.Type == kind && node.DesiredState == "running" {
 				_, _ = s.agent.Apply(node.ID)
@@ -933,11 +1081,17 @@ func spa(files http.Handler, sub fs.FS) http.Handler {
 		files.ServeHTTP(w, r)
 	})
 }
-func nodeNetworks(kind, mode string) []string {
+func nodeNetworks(kind string, config nodes.Config) []string {
+	if kind == "anyconnect" {
+		if config.UDPEnabled {
+			return []string{"tcp", "udp"}
+		}
+		return []string{"tcp"}
+	}
 	if kind != "ss2022" {
 		return []string{"tcp"}
 	}
-	switch mode {
+	switch config.Mode {
 	case "tcp_only":
 		return []string{"tcp"}
 	case "udp_only":

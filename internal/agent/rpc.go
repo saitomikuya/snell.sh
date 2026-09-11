@@ -55,4 +55,17 @@ type RuntimeInstallResult struct {
 	Architecture string
 	InstalledAt  string
 }
+type AssetRefreshRequest struct {
+	NodeID string
+	Kind   string
+}
+type AssetRefreshResult struct {
+	OK          bool   `json:"ok"`
+	Changed     bool   `json:"changed"`
+	Kind        string `json:"kind"`
+	Fingerprint string `json:"fingerprint"`
+	Count       int    `json:"count,omitempty"`
+	UpdatedAt   string `json:"updatedAt"`
+	Message     string `json:"message"`
+}
 type Empty struct{}

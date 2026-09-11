@@ -2,14 +2,14 @@
 
 Proxy Panel 是面向 Debian/Ubuntu VPS 的单容器中文代理管理面板。它用 Go 提供 Web/API 与受控 Runtime Agent，用 Vue 3 提供响应式界面，并把数据库、配置、运行时、日志和备份统一持久化到 `/data`。
 
-本项目是在 [jinqians/snell.sh](https://github.com/jinqians/snell.sh) 与 [jinqians/ss-2022.sh](https://github.com/jinqians/ss-2022.sh) 的功能和配置语义基础上进行的可视化二次开发，不是上游官方版本。新增能力主要包括中文 Web 面板、节点操作、客户端配置、节点与项目总流量限额、备份恢复、版本检查和行为审计。
+本项目是在 [jinqians/snell.sh](https://github.com/jinqians/snell.sh)、[jinqians/ss-2022.sh](https://github.com/jinqians/ss-2022.sh) 与 [MoeClub/ocserv_docker](https://github.com/MoeClub/ocserv_docker) 的功能和配置语义基础上进行的可视化二次开发，不是上游官方版本。新增能力主要包括中文 Web 面板、AnyConnect/ocserv、节点操作、客户端配置、节点与项目总流量限额、备份恢复、版本检查和行为审计。
 
 ## 一键部署
 
 Docker Hub 镜像 `saitomikuya/proxy-panel:latest` 同时支持 `linux/amd64` 和 `linux/arm64`。已经安装 Docker 的 Debian/Ubuntu VPS 可直接执行：
 
 ```bash
-sudo docker run -d --name proxy-panel --pull=always --restart unless-stopped --network host --cap-add NET_ADMIN --cap-add NET_RAW -v /opt/proxy-panel:/data -e PANEL_BIND=0.0.0.0 -e PANEL_PORT=8080 -e TZ=Asia/Shanghai saitomikuya/proxy-panel:latest
+sudo docker run -d --name proxy-panel --pull=always --restart unless-stopped --network host --cap-add NET_ADMIN --cap-add NET_RAW --device /dev/net/tun:/dev/net/tun -v /opt/proxy-panel:/data -e PANEL_BIND=0.0.0.0 -e PANEL_PORT=8080 -e TZ=Asia/Shanghai saitomikuya/proxy-panel:latest
 ```
 
 部署完成后直接打开 `http://你的服务器IP:8080`，使用默认密码 `password` 登录并按提示立即改密，不再需要先建立 SSH 隧道。请在云安全组或防火墙中仅向可信 IP 放行 `8080/tcp`；长期使用建议配置 HTTPS。详细设置和面板操作请继续阅读[完整使用说明](./docs/USER_GUIDE.md)。
@@ -17,6 +17,7 @@ sudo docker run -d --name proxy-panel --pull=always --restart unless-stopped --n
 ## 使用入口
 
 - 第一次部署、面板逐项操作、客户端导入和排障：阅读[完整使用说明](./docs/USER_GUIDE.md)；
+- AnyConnect、证书中心、用户路由组和宿主机边界：阅读[AnyConnect 使用说明](./docs/ANYCONNECT.md)；
 - 已实现功能与仍有限制的项目：阅读[实现状态](./docs/IMPLEMENTATION_STATUS.md)；
 - 安全设计、威胁边界与测试要求：阅读[安全说明](./SECURITY.md)；
 - 只想本地构建体验：可直接跳到下方“本地开发”或“构建和运行容器”。
@@ -31,7 +32,10 @@ sudo docker run -d --name proxy-panel --pull=always --restart unless-stopped --n
 - Argon2id 密码哈希；首次登录强制改密；改密或重置后注销全部 Session。
 - `HttpOnly`、`SameSite=Strict` Cookie，CSRF 双提交校验、Origin 校验和按 IP 登录限速。
 - SQLite WAL、版本化迁移、主密钥 AES-256-GCM 加密节点秘密。
-- Snell、SS-2022、ShadowTLS 节点数据模型、CRUD、依赖和 TCP/UDP 端口冲突校验。
+- Snell、SS-2022、ShadowTLS、AnyConnect 节点数据模型、CRUD、依赖和 TCP/UDP 端口冲突校验。
+- 多 AnyConnect 节点、用户名/密码认证、逐用户“全隧道 / 中国直连 / 登录时选择”路由组、可配置容量和 Cisco Secure Client/OpenConnect 连接信息。
+- 证书中心 HTTPS 拉取、Basic Auth、证书链/域名/有效期/私钥匹配校验、原子切换，以及每天/每周定时更新和手动刷新。
+- APNIC 或纯 CIDR 中国大陆 IPv4 数据源、解析防护、原子切换和定时更新。
 - Web 与 Agent 之间的 Unix Socket 类型化 RPC；没有任意 Shell 或路径读写接口。
 - 固定路径配置生成、候选配置、最后可用快照、原子替换、失败回滚。
 - 多实例启动、停止、重启、进程组信号、崩溃退避、依赖启动顺序和滚动脱敏日志。
@@ -49,7 +53,6 @@ sudo docker run -d --name proxy-panel --pull=always --restart unless-stopped --n
 ## 仍需完成后才能称为“全功能版”
 
 - 节点 CPU/内存/连接数等更细的单节点运行指标。
-- 中国大陆 CIDR 数据集的下载、原子集合切换和定时更新。
 - simple-obfs 二进制的安全安装与失败回滚（配置 Schema 已预留）。
 - Snell v4/v6 的固定版本运行时目录和校验清单；当前自动安装并默认运行 v5。
 - SSE 持续日志流及其连接/速率限制；当前界面支持按需查看最近 100、300 或 1000 行。
@@ -68,6 +71,7 @@ Browser → panel server（UID 10001）→ SQLite / encrypted secrets
                                               ├── Snell instances
                                               ├── ssserver instances
                                               ├── ShadowTLS instances
+                                              ├── ocserv / AnyConnect instances
                                               └── proxy_panel nftables table
 ```
 
@@ -116,6 +120,7 @@ Compose 示例具备以下边界：
 
 - `network_mode: host`
 - 仅添加 `NET_ADMIN`、`NET_RAW`
+- 只映射 `/dev/net/tun` 设备；不自动修改宿主机 `net.ipv4.ip_forward`
 - 不使用 `--privileged`
 - 不挂载 Docker Socket
 - 只把 `/opt/proxy-panel` 挂载为 `/data`
@@ -154,11 +159,12 @@ docker exec proxy-panel panel version
 
 ## 运行时供应链
 
-生产镜像不包含 Snell、shadowsocks-rust 或 ShadowTLS 二进制。Agent 首次启动时只从 [运行时目录](./internal/runtime/catalog.yaml) 中列出的固定 URL 下载，并校验固定 SHA256：
+生产镜像不包含 Snell、shadowsocks-rust 或 ShadowTLS 二进制。Agent 首次启动时只从 [运行时目录](./internal/runtime/catalog.yaml) 中列出的固定 URL 下载，并校验固定 SHA256。ocserv 1.5.0 则由镜像构建阶段从官方发布包编译，并校验固定 SHA-256：
 
 - Snell v5.0.1：`dl.nssurge.com`
 - shadowsocks-rust v1.24.0：官方 GitHub Release
 - ShadowTLS v0.2.25：官方 GitHub Release
+- ocserv v1.5.0：Infradead 官方发布包，镜像构建时固定 SHA-256 并从源码编译；对应源码包保留在镜像 `/usr/share/source/`
 
 下载限制为 100 MiB、2 分钟、最多 5 次重定向；重定向目标也必须在白名单内。Snell 的再分发条件未确认，因此只允许运行时从 Surge 官方源下载，不写入镜像或仓库。
 

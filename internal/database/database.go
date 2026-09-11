@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -59,6 +60,18 @@ func (s *Store) Migrate(ctx context.Context) error {
 		if found > 0 {
 			continue
 		}
+		// Migration 6 rebuilds the nodes table to widen its CHECK constraint.
+		// SQLite cannot disable foreign-key enforcement after a transaction has
+		// started, so run this one migration on a pinned connection with the
+		// pragma changed before BEGIN. The database uses a single connection per
+		// process, which also prevents unrelated statements from observing the
+		// temporary setting.
+		if version == 6 {
+			if err = s.migrateWithoutForeignKeys(ctx, version, migration); err != nil {
+				return err
+			}
+			continue
+		}
 		tx, err := s.DB.BeginTx(ctx, nil)
 		if err != nil {
 			return err
@@ -83,6 +96,53 @@ func (s *Store) Migrate(ctx context.Context) error {
 		if err = tx.Commit(); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (s *Store) migrateWithoutForeignKeys(ctx context.Context, version int, migration string) (returnErr error) {
+	conn, err := s.DB.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err = conn.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
+		return err
+	}
+	defer func() {
+		if _, enableErr := conn.ExecContext(context.Background(), `PRAGMA foreign_keys=ON`); returnErr == nil && enableErr != nil {
+			returnErr = enableErr
+		}
+	}()
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var found int
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version=?`, version).Scan(&found); err != nil {
+		return err
+	}
+	if found > 0 {
+		return tx.Commit()
+	}
+	if _, err = tx.ExecContext(ctx, migration); err != nil {
+		return fmt.Errorf("migration %d: %w", version, err)
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)`, version, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	var table, parent string
+	var rowID int64
+	var fkID int
+	if err = conn.QueryRowContext(ctx, `SELECT "table",rowid,parent,fkid FROM pragma_foreign_key_check LIMIT 1`).Scan(&table, &rowID, &parent, &fkID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err == nil {
+		return fmt.Errorf("migration %d left a foreign-key violation in %s row %d referencing %s", version, table, rowID, parent)
 	}
 	return nil
 }
@@ -115,7 +175,7 @@ func (s *Store) Maintain(ctx context.Context) error {
 			SELECT older.id FROM config_revisions AS older
 			WHERE (SELECT COUNT(*) FROM config_revisions AS newer WHERE newer.node_id=older.node_id AND newer.revision>older.revision) >= 20
 		)`, nil},
-		{`DELETE FROM secrets WHERE id NOT IN (SELECT secret_ref FROM node_configs)`, nil},
+		{`DELETE FROM secrets WHERE id NOT IN (SELECT secret_ref FROM node_configs UNION SELECT password_secret_ref FROM anyconnect_users)`, nil},
 		{`DELETE FROM jobs WHERE updated_at < ? AND status IN ('succeeded','failed','completed','cancelled')`, []any{cutoff}},
 	}
 	for _, statement := range statements {

@@ -36,7 +36,7 @@ func (c Config) Address() string { return fmt.Sprintf("%s:%d", c.Bind, c.Port) }
 func (c Config) InitDirectories() error {
 	directoryMode := os.FileMode(0770) | os.ModeSetgid
 	dirs := []string{
-		"db", "config/snell", "config/ss", "config/shadowtls", "runtime",
+		"db", "config/snell", "config/ss", "config/shadowtls", "config/anyconnect", "anyconnect/assets", "runtime",
 		"upstream/manifests", "upstream/scripts", "upstream/checksums", "releases", "releases/uploads",
 		"backups", "logs", "traffic", "secrets",
 	}

@@ -84,21 +84,29 @@ func (s *RuntimeService) SetBlocked(req BlockRequest, out *Result) error {
 	if err != nil {
 		return err
 	}
-	networks := []string{"tcp"}
-	if node.Type == "ss2022" {
-		switch node.Config.Mode {
-		case "udp_only":
-			networks = []string{"udp"}
-		case "tcp_and_udp":
-			networks = []string{"tcp", "udp"}
-		}
-	}
+	networks := nodeNetworks(node)
 	if err = firewall.SetBlocked(node.ID, node.ListenPort, networks, req.Blocked); err != nil {
 		return err
 	}
 	out.OK = true
 	out.Message = "firewall policy applied"
 	return nil
+}
+func (s *RuntimeService) RefreshAnyConnectAsset(req AssetRefreshRequest, out *AssetRefreshResult) error {
+	value, err := s.Manager.RefreshAnyConnectAsset(req.NodeID, req.Kind)
+	*out = value
+	return err
+}
+func (s *RuntimeService) RemoveAnyConnect(req NodeRequest, out *Result) error {
+	if req.NodeID == "" {
+		return errors.New("node id is required")
+	}
+	err := s.Manager.RemoveAnyConnect(req.NodeID)
+	out.OK = err == nil
+	if err != nil {
+		out.Message = err.Error()
+	}
+	return err
 }
 func (s *RuntimeService) SetProjectBlocked(req BlockRequest, out *Result) error {
 	value, err := s.Manager.SetProjectBlocked(req.Blocked)
@@ -192,6 +200,9 @@ func Serve(socket string, manager *Manager) error {
 			if cycles%6 == 0 {
 				manager.Reconcile()
 				_, _ = manager.MaintainLogs()
+			}
+			if cycles%10 == 0 {
+				manager.RefreshDueAnyConnectAssets()
 			}
 		}
 	}()

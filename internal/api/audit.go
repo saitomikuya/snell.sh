@@ -20,6 +20,10 @@ var auditActionLabels = map[string]string{
 	"node.restart":                 "重启节点",
 	"node.logs.view":               "查看节点运行日志",
 	"node.client_config.view":      "查看完整客户端配置和二维码",
+	"anyconnect.user.create":       "创建 AnyConnect 用户",
+	"anyconnect.user.update":       "更新 AnyConnect 用户与路由组",
+	"anyconnect.user.delete":       "删除 AnyConnect 用户",
+	"anyconnect.asset.refresh":     "刷新 AnyConnect 证书或路由数据",
 	"traffic.quota.update":         "修改节点流量限额",
 	"traffic.pause":                "暂停节点网络访问",
 	"traffic.resume":               "恢复节点网络访问",
@@ -117,6 +121,15 @@ func describeAudit(action, targetType, raw string) (string, string, string) {
 	if value, ok := details["nodesUpdated"].(float64); ok {
 		parts = append(parts, fmt.Sprintf("更新节点：%.0f 个", value))
 	}
+	if value, ok := details["username"].(string); ok && value != "" {
+		parts = append(parts, "用户："+value)
+	}
+	if value, ok := details["routeGroup"].(string); ok && value != "" {
+		parts = append(parts, "路由组："+map[string]string{"full": "全隧道", "cn": "中国直连", "select": "登录时选择"}[value])
+	}
+	if value, ok := details["kind"].(string); ok && value != "" {
+		parts = append(parts, "资源："+map[string]string{"certificate": "服务器证书", "cidr": "中国 CIDR"}[value])
+	}
 	if value, ok := details["rolledBack"].(bool); ok && value {
 		parts = append(parts, "应用失败并已自动回滚")
 	}
@@ -131,6 +144,8 @@ func protocolName(value string) string {
 		return "Shadowsocks 2022"
 	case "shadowtls":
 		return "ShadowTLS"
+	case "anyconnect":
+		return "AnyConnect"
 	default:
 		return value
 	}

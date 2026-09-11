@@ -89,3 +89,13 @@ func (c *Client) CleanupFirewall() (Result, error) {
 	err := c.call("CleanupFirewall", Empty{}, &out)
 	return out, err
 }
+func (c *Client) RefreshAnyConnectAsset(nodeID, kind string) (AssetRefreshResult, error) {
+	var out AssetRefreshResult
+	err := c.callWithTimeout("RefreshAnyConnectAsset", AssetRefreshRequest{NodeID: nodeID, Kind: kind}, &out, 45*time.Second)
+	return out, err
+}
+func (c *Client) RemoveAnyConnect(nodeID string) (Result, error) {
+	var out Result
+	err := c.call("RemoveAnyConnect", NodeRequest{NodeID: nodeID}, &out)
+	return out, err
+}
