@@ -13,7 +13,7 @@ import (
 
 // TestLiveAnyConnectAssets is intentionally skipped in ordinary CI. It allows
 // maintainers to verify a real certificate distribution center and the APNIC
-// feed without checking credentials into the repository.
+// route feed without checking credentials into the repository.
 func TestLiveAnyConnectAssets(t *testing.T) {
 	certificateURL := os.Getenv("ANYCONNECT_TEST_CERT_URL")
 	privateKeyURL := os.Getenv("ANYCONNECT_TEST_KEY_URL")
@@ -44,6 +44,7 @@ func TestLiveAnyConnectAssets(t *testing.T) {
 			ServerName:            serverName,
 			VPNNetwork:            "192.168.144.0/24",
 			DNS:                   "1.1.1.1,8.8.8.8",
+			ChinaDirectDNS:        "223.5.5.5,119.29.29.29",
 			MTU:                   1340,
 			MaxClients:            32,
 			MaxSameClients:        2,

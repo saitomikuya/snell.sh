@@ -35,7 +35,7 @@ sudo docker run -d --name proxy-panel --pull=always --restart unless-stopped --n
 - Snell、SS-2022、ShadowTLS、AnyConnect 节点数据模型、CRUD、依赖和 TCP/UDP 端口冲突校验。
 - 多 AnyConnect 节点、用户名/密码认证、逐用户“全隧道 / 中国直连 / 登录时选择”路由组、可配置容量和 Cisco Secure Client/OpenConnect 连接信息。
 - 证书中心 HTTPS 拉取、Basic Auth、证书链/域名/有效期/私钥匹配校验、原子切换，以及每天/每周定时更新和手动刷新。
-- APNIC 或纯 CIDR 中国大陆 IPv4 数据源、解析防护、原子切换和定时更新。
+- Cisco 路由上限适配的 APNIC 中国 IPv4 筛选，可选粗粒度 `no-route` 或纯 CIDR 数据源，以及解析防护、原子切换和定时更新。
 - Web 与 Agent 之间的 Unix Socket 类型化 RPC；没有任意 Shell 或路径读写接口。
 - 固定路径配置生成、候选配置、最后可用快照、原子替换、失败回滚。
 - 多实例启动、停止、重启、进程组信号、崩溃退避、依赖启动顺序和滚动脱敏日志。
@@ -43,7 +43,7 @@ sudo docker run -d --name proxy-panel --pull=always --restart unless-stopped --n
 - 默认部署 Snell + ShadowTLS 与 SS-2022 + ShadowTLS 两套组合；SS 的 UDP 继续使用原始 SS 端口。
 - 默认 Snell 监听 `0.0.0.0`，可直接承载 TCP/UDP/QUIC；系统设置支持关闭节点运行日志写入并保留日志总量上限。
 - Snell/Surge、SS/SIP002、ShadowTLS 组合配置和二维码；完整配置在已登录且已完成首次改密的安全会话中直接展示。
-- nftables 公网端口字节采样、按节点和项目独立周期累计、流量限额、手动/自动暂停恢复；只操作 `inet proxy_panel` 专属表。
+- nftables 公网端口字节采样、按节点和项目独立周期累计、流量限额、手动/自动暂停恢复；统计和 NAT 只使用 `inet proxy_panel` 专属表，AnyConnect 另使用限定 TUN 接口与地址池的专用转发链。
 - 按节点查看运行时输出与中文启停、重启、流量活动和限额行为日志；可配置全部节点日志空间上限，超限时优先清理最旧文件，审计记录也按小时定期裁剪。
 - SQLite 一致性备份、哈希校验、路径穿越防护、恢复前自动备份、在线恢复和 Session 注销。
 - 中文桌面/手机面板：仪表盘、节点、流量、三项运行时版本对比、一键更新与安全上传适配、备份、节点日志、中文行为审计、安全与日志设置，以及可持久化切换的白天/黑夜模式。
@@ -72,7 +72,8 @@ Browser → panel server（UID 10001）→ SQLite / encrypted secrets
                                               ├── ssserver instances
                                               ├── ShadowTLS instances
                                               ├── ocserv / AnyConnect instances
-                                              └── proxy_panel nftables table
+                                              ├── proxy_panel nftables table
+                                              └── PROXY-PANEL-VPN host-forward chain
 ```
 
 Web 不执行协议命令，不接收任意命令字符串。Agent 只根据节点 ID 从数据库读取结构化数据，并将其映射到 `/data` 下的固定路径和参数数组。

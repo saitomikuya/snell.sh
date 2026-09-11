@@ -8,7 +8,7 @@
 | M1 认证与面板 | 完成 | 默认密码、强制改密、Argon2id、Session、CSRF、限速、中文响应式 UI |
 | M2 Runtime Agent | 完成 | 类型化 Unix RPC、配置事务、进程组、依赖、日志、退避、假运行时集成测试 |
 | M3 真实协议 | 部分完成 | Snell、SS-2022、ShadowTLS 与 AnyConnect/ocserv 配置和运行时完成；Snell v4/v6 与 simple-obfs 自动安装待补 |
-| M4 网络高级功能 | 部分完成 | 专属 nftables 表、字节采样、流量限额、AnyConnect NAT 及中国 CIDR 定时原子更新完成；更完整宿主机指标待补 |
+| M4 网络高级功能 | 部分完成 | 专属 nftables 表、字节采样、流量限额、AnyConnect NAT、Docker `FORWARD` 兼容及中国 CIDR 定时原子更新完成；更完整宿主机指标待补 |
 | M5 更新与备份 | 部分完成 | 三项运行时官方版本对比、安全一键更新、带 SHA-256/ELF 架构验证的手动上传适配、自动备份、节点回滚和备份恢复完成；异步 Job 进度待补 |
 | M6 发布 | 部分完成 | Docker、Compose、s6、脚本、CI、文档和 Docker Hub 多架构镜像完成；安全扫描与签名待外部 CI |
 

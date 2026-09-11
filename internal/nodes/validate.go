@@ -15,7 +15,10 @@ var namePattern = regexp.MustCompile(`^[^\x00-\x1f\x7f]{1,64}$`)
 var hostnamePattern = regexp.MustCompile(`^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$`)
 var scheduleTimePattern = regexp.MustCompile(`^(?:[01][0-9]|2[0-3]):[0-5][0-9]$`)
 
-const DefaultChinaCIDRSource = "https://ftp.apnic.net/stats/apnic/delegated-apnic-latest"
+const (
+	DefaultChinaCIDRSource = "https://ftp.apnic.net/stats/apnic/delegated-apnic-latest"
+	DefaultChinaDirectDNS  = "223.5.5.5,119.29.29.29"
+)
 
 func Normalize(req *CreateRequest) {
 	if req.ListenHost == "" {
@@ -48,12 +51,7 @@ func Normalize(req *CreateRequest) {
 	if req.Config.CertificateScheduleTime == "" {
 		req.Config.CertificateScheduleTime = "03:30"
 	}
-	if req.Config.ChinaCIDRSourceURL == "" {
-		req.Config.ChinaCIDRSourceURL = DefaultChinaCIDRSource
-	}
-	if req.Config.ChinaCIDRSourceFormat == "" {
-		req.Config.ChinaCIDRSourceFormat = "apnic"
-	}
+	normalizeAnyConnectRouting(&req.Config)
 	if req.Config.ChinaCIDRSchedule == "" {
 		req.Config.ChinaCIDRSchedule = "daily"
 	}
@@ -129,13 +127,22 @@ func Validate(req CreateRequest) error {
 		if err != nil || !prefix.Addr().Is4() || prefix != prefix.Masked() || prefix.Bits() < 16 || prefix.Bits() > 29 || !prefix.Addr().IsPrivate() {
 			return errors.New("VPN 地址池必须是 /16–/29 的规范私有 IPv4 CIDR")
 		}
-		dnsValues := strings.Split(req.Config.DNS, ",")
-		if len(dnsValues) < 1 || len(dnsValues) > 3 {
-			return errors.New("DNS 服务器必须配置 1–3 个 IP 地址")
-		}
-		for _, value := range dnsValues {
-			if net.ParseIP(strings.TrimSpace(value)) == nil {
-				return errors.New("DNS 服务器必须是有效 IP 地址")
+		for _, item := range []struct {
+			value string
+			label string
+		}{{req.Config.DNS, "DNS"}, {req.Config.ChinaDirectDNS, "中国直连 DNS"}} {
+			dnsValues := strings.Split(item.value, ",")
+			if len(dnsValues) < 1 || len(dnsValues) > 3 {
+				return errors.New(item.label + " 服务器必须配置 1–3 个 IP 地址")
+			}
+			for _, value := range dnsValues {
+				parsed := net.ParseIP(strings.TrimSpace(value))
+				if parsed == nil {
+					return errors.New(item.label + " 服务器必须是有效 IP 地址")
+				}
+				if item.label == "中国直连 DNS" && parsed.To4() == nil {
+					return errors.New(item.label + " 服务器必须是 IPv4 地址")
+				}
 			}
 		}
 		if req.Config.MTU < 1200 || req.Config.MTU > 1500 {
@@ -178,6 +185,18 @@ func Validate(req CreateRequest) error {
 		}
 	}
 	return nil
+}
+
+func normalizeAnyConnectRouting(config *Config) {
+	if config.ChinaDirectDNS == "" {
+		config.ChinaDirectDNS = DefaultChinaDirectDNS
+	}
+	if config.ChinaCIDRSourceURL == "" {
+		config.ChinaCIDRSourceURL = DefaultChinaCIDRSource
+	}
+	if config.ChinaCIDRSourceFormat == "" {
+		config.ChinaCIDRSourceFormat = "apnic"
+	}
 }
 
 func validateHTTPSURL(raw, label string) error {

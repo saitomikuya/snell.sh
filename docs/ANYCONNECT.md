@@ -18,7 +18,7 @@ test -c /dev/net/tun && echo TUN_OK
 sysctl net.ipv4.ip_forward
 ```
 
-面板只在自己的 `inet proxy_panel` nftables 表中添加 VPN 转发和 masquerade 规则，不修改 UFW、firewalld、Docker 链或其他表；节点停止、删除或执行 `panelctl cleanup-firewall` 时会清理这些规则。TUN 设备和转发/NAT 规则是 VPN 工作所必需的最小宿主机网络影响。
+面板在自己的 `inet proxy_panel` nftables 表中添加 VPN 转发和 masquerade 规则。由于 Docker 通常把宿主机 `FORWARD` 默认策略设为 `DROP`，面板还会在 Docker 官方预留的 `DOCKER-USER` 钩子下挂接专用 `PROXY-PANEL-VPN` 链；规则同时限定节点的 TUN 接口和 VPN 地址池，不修改 Docker 自身规则或其他转发流量。节点停止或删除时会清理对应规则。TUN 设备和这些可追踪、可清理的转发/NAT 规则是 VPN 工作所必需的最小宿主机网络影响。
 
 ## 创建节点
 
@@ -27,7 +27,8 @@ sysctl net.ipv4.ip_forward
 - 连接域名：必须被服务器证书的 SAN 覆盖；
 - 监听端口：默认 `443`，TCP/UDP 使用同一端口；
 - VPN 地址池：默认 `192.168.144.0/24`，多个 AnyConnect 节点的地址池不能重叠；
-- DNS：默认 `1.1.1.1,8.8.8.8`；
+- 全隧道 DNS：默认 `1.1.1.1,8.8.8.8`，DNS 查询进入 VPN；
+- 中国直连 DNS：默认 `223.5.5.5,119.29.29.29`，`ChinaDirect` 不强制 DNS 进入隧道，这些国内 DNS 随中国路由从客户端本地网络直连；
 - MTU：默认 `1340`；
 - 最大客户端数：默认 `32`；
 - 单用户同时连接数：默认 `2`；
@@ -58,7 +59,11 @@ sysctl net.ipv4.ip_forward
 - `中国直连`：默认路由进入 VPN，但中国大陆 IPv4 前缀通过 `no-route` 下发，由客户端本地直连；
 - `登录时选择`：连接时在上述两组中选择。
 
-默认 CIDR 来源是 APNIC 的 `delegated-apnic-latest`，只接收国家码为 `CN`、类型为 IPv4、状态为 allocated/assigned 的记录。也可换成每行一个规范公网 IPv4 CIDR 的 HTTPS 数据源。更新内容必须通过解析和条目数量合理性检查，之后才会原子替换；失败保留上一版。
+默认 CIDR 来源是 APNIC 的 `delegated-apnic-latest`，只接收国家码为 `CN`、类型为 IPv4、状态为 allocated/assigned 的记录。面板会先排除特殊用途地址、无损合并连续网段，然后按覆盖地址数从大到小下发最多 1197 条，为 1–3 个中国直连 DNS 保留主机路由；未被选中的小网段继续走 VPN，不会将非中国地址扩大为本地直连。
+
+面板的 `cidr` 格式同时接受每行一个的 CIDR 和 `no-route = IP/子网掩码` 格式，因此也可使用 [`lgdglgc/ocserv`](https://github.com/lgdglgc/ocserv) 这类约 200 条的粗粒度列表。这类列表条目更少，但可能将较多相邻非中国地址也视为本地直连，应由管理员明确选择。
+
+Cisco Secure Client 5.1 的静态 IPv4 分流上限为 1200 条。APNIC 全量 CN 分配数据会产生数千条路由，服务端虽然能显示，客户端却会截断。当前筛选策略在不误放非中国地址的前提下，对最新 APNIC 数据可覆盖约 98% 的中国 IPv4 地址空间。自定义 CIDR/no-route 列表超过 1197 条时会拒绝更新，避免加上 DNS 直连路由后超限而静默漏分流。更新内容必须通过公网地址、条目数和覆盖地址数检查，之后才会原子替换；失败保留上一版。已缓存的超限路由会在下次配置生成时自动按新规则重新拉取。
 
 证书和 CIDR 均支持“仅手动”“每天某时”或“每周某天某时”。计划按容器 `TZ` 执行；失败后至少间隔 30 分钟再自动重试。也可在“用户与资源”中立即刷新。
 

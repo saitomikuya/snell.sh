@@ -15,7 +15,7 @@ AnyConnect 证书与中国 CIDR 下载额外拒绝内网、回环、链路本地
 
 ## 防火墙边界
 
-Agent 只创建或删除 `inet proxy_panel` 表中的项目规则。AnyConnect 需要 TUN、IPv4 转发和 NAT；面板只检查宿主机 `net.ipv4.ip_forward=1`，不会替用户写 sysctl，也不会修改 UFW、firewalld、Docker 链或其他 nftables 表。`panelctl cleanup-firewall` 不读取 API 传入的命令，不清理其他表。不要在日常开发机设置特权测试变量。
+Agent 为公网端口、AnyConnect 转发和 NAT 创建 `inet proxy_panel` 专属表。Docker 常将宿主机 `FORWARD` 默认策略设为 `DROP`，因此 AnyConnect 还会创建 `PROXY-PANEL-VPN` 专用 iptables 链，并从 Docker 预留的 `DOCKER-USER` 钩子（不存在时为 `FORWARD`）引入。链内规则同时限定节点 TUN 接口和 VPN 地址池，不改动 Docker 自身规则或其他转发流量。面板只检查宿主机 `net.ipv4.ip_forward=1`，不会替用户写 sysctl，也不会修改 UFW/firewalld 配置。`panelctl cleanup-firewall` 不读取 API 传入的命令，只清理本项目的表和专用链。不要在日常开发机设置特权测试变量。
 
 ## 漏洞报告
 

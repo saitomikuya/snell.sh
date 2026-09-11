@@ -29,6 +29,7 @@ type Node struct {
 type Config struct {
 	Version                 string `json:"version,omitempty"`
 	DNS                     string `json:"dns,omitempty"`
+	ChinaDirectDNS          string `json:"chinaDirectDns,omitempty"`
 	IPv6                    bool   `json:"ipv6,omitempty"`
 	TFO                     bool   `json:"tfo,omitempty"`
 	Public                  bool   `json:"public,omitempty"`

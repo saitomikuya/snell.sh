@@ -20,7 +20,11 @@ import (
 	"time"
 )
 
-const maxAssetDownload = 8 << 20
+const (
+	maxAssetDownload         = 8 << 20
+	maxCiscoStaticIPv4Routes = 1200
+	maxChinaCIDRRoutes       = maxCiscoStaticIPv4Routes - 3
+)
 
 var nonPublicDownloadRanges = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),
@@ -36,6 +40,7 @@ var nonPublicDownloadRanges = []netip.Prefix{
 	netip.MustParsePrefix("198.18.0.0/15"),
 	netip.MustParsePrefix("198.51.100.0/24"),
 	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("224.0.0.0/4"),
 	netip.MustParsePrefix("240.0.0.0/4"),
 	netip.MustParsePrefix("::/128"),
 	netip.MustParsePrefix("::1/128"),
@@ -154,13 +159,19 @@ func ParseChinaCIDRs(input []byte, format string) ([]netip.Prefix, error) {
 	if err != nil {
 		return nil, err
 	}
+	for _, prefix := range prefixes {
+		if prefix.Bits() < 7 || !prefix.Addr().Is4() || !isPublicAddress(prefix.Addr()) {
+			return nil, fmt.Errorf("中国 CIDR 包含过宽或非公网前缀：%s", prefix)
+		}
+	}
+	prefixes = excludeSpecialUsePrefixes(prefixes)
 	prefixes = normalizePrefixes(prefixes)
-	if len(prefixes) < 100 || len(prefixes) > 20000 {
+	if len(prefixes) < 100 {
 		return nil, fmt.Errorf("中国 CIDR 条目数量异常：%d", len(prefixes))
 	}
 	var addressCount uint64
 	for index, prefix := range prefixes {
-		if prefix.Bits() < 8 || !isPublicAddress(prefix.Addr()) {
+		if prefix.Bits() < 7 || !isPublicAddress(prefix.Addr()) {
 			return nil, fmt.Errorf("中国 CIDR 包含过宽或非公网前缀：%s", prefix)
 		}
 		for _, blocked := range nonPublicDownloadRanges {
@@ -175,6 +186,12 @@ func ParseChinaCIDRs(input []byte, format string) ([]netip.Prefix, error) {
 	}
 	if addressCount < 10_000_000 || addressCount > 1_000_000_000 {
 		return nil, fmt.Errorf("中国 CIDR 地址总量异常：%d", addressCount)
+	}
+	if format == "apnic" {
+		prefixes = collapsePrefixes(prefixes)
+		prefixes = largestPrefixes(prefixes, maxChinaCIDRRoutes)
+	} else if len(prefixes) > maxChinaCIDRRoutes {
+		return nil, fmt.Errorf("中国 CIDR 共 %d 条，超过为 Cisco Secure Client 预留 DNS 直连路由后的上限 %d；请改用已聚合的 CIDR/no-route 数据源", len(prefixes), maxChinaCIDRRoutes)
 	}
 	return prefixes, nil
 }
@@ -214,13 +231,20 @@ func parseCIDRList(input []byte) ([]netip.Prefix, error) {
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	var prefixes []netip.Prefix
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+		line := strings.TrimSpace(strings.TrimPrefix(scanner.Text(), "\ufeff"))
 		line = strings.TrimSpace(strings.TrimPrefix(line, "-"))
 		line = strings.Trim(line, "'\"")
 		if line == "" || line == "payload:" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		prefix, err := netip.ParsePrefix(line)
+		if strings.HasPrefix(line, "no-route") {
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) != 2 || strings.TrimSpace(parts[0]) != "no-route" {
+				return nil, fmt.Errorf("CIDR 数据包含无效的 no-route 配置：%s", line)
+			}
+			line = strings.TrimSpace(parts[1])
+		}
+		prefix, err := parseIPv4Prefix(line)
 		if err != nil || !prefix.Addr().Is4() || prefix != prefix.Masked() || !isPublicAddress(prefix.Addr()) {
 			return nil, fmt.Errorf("CIDR 数据包含无效的公网 IPv4 前缀：%s", line)
 		}
@@ -230,6 +254,58 @@ func parseCIDRList(input []byte) ([]netip.Prefix, error) {
 		return nil, err
 	}
 	return prefixes, nil
+}
+
+func parseIPv4Prefix(value string) (netip.Prefix, error) {
+	parts := strings.Split(value, "/")
+	if len(parts) != 2 || !strings.Contains(parts[1], ".") {
+		return netip.ParsePrefix(value)
+	}
+	address, err := netip.ParseAddr(parts[0])
+	if err != nil || !address.Is4() {
+		return netip.Prefix{}, errors.New("invalid IPv4 address")
+	}
+	maskIP := net.ParseIP(parts[1]).To4()
+	if maskIP == nil {
+		return netip.Prefix{}, errors.New("invalid IPv4 netmask")
+	}
+	ones, bits := net.IPMask(maskIP).Size()
+	if bits != 32 || ones < 0 {
+		return netip.Prefix{}, errors.New("non-contiguous IPv4 netmask")
+	}
+	return netip.PrefixFrom(address, ones), nil
+}
+
+func excludeSpecialUsePrefixes(prefixes []netip.Prefix) []netip.Prefix {
+	result := append([]netip.Prefix(nil), prefixes...)
+	for _, excluded := range nonPublicDownloadRanges {
+		if !excluded.Addr().Is4() {
+			continue
+		}
+		next := make([]netip.Prefix, 0, len(result))
+		for _, prefix := range result {
+			next = append(next, subtractPrefix(prefix, excluded)...)
+		}
+		result = next
+	}
+	return result
+}
+
+func subtractPrefix(prefix, excluded netip.Prefix) []netip.Prefix {
+	if !prefix.Contains(excluded.Addr()) && !excluded.Contains(prefix.Addr()) {
+		return []netip.Prefix{prefix}
+	}
+	if excluded.Bits() <= prefix.Bits() && excluded.Contains(prefix.Addr()) {
+		return nil
+	}
+	nextBits := prefix.Bits() + 1
+	left := netip.PrefixFrom(prefix.Addr(), nextBits)
+	raw := prefix.Addr().As4()
+	rightValue := binary.BigEndian.Uint32(raw[:]) + uint32(uint64(1)<<(32-nextBits))
+	binary.BigEndian.PutUint32(raw[:], rightValue)
+	right := netip.PrefixFrom(netip.AddrFrom4(raw), nextBits)
+	result := subtractPrefix(left, excluded)
+	return append(result, subtractPrefix(right, excluded)...)
 }
 
 func rangeToPrefixes(start netip.Addr, count uint64) ([]netip.Prefix, error) {
@@ -278,6 +354,50 @@ func normalizePrefixes(prefixes []netip.Prefix) []netip.Prefix {
 		return leftValue < rightValue
 	})
 	return result
+}
+
+func collapsePrefixes(prefixes []netip.Prefix) []netip.Prefix {
+	prefixes = normalizePrefixes(prefixes)
+	type interval struct {
+		start uint64
+		end   uint64
+	}
+	intervals := make([]interval, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		raw := prefix.Addr().As4()
+		start := uint64(binary.BigEndian.Uint32(raw[:]))
+		end := start + uint64(1)<<(32-prefix.Bits())
+		if len(intervals) > 0 && start == intervals[len(intervals)-1].end {
+			intervals[len(intervals)-1].end = end
+			continue
+		}
+		intervals = append(intervals, interval{start: start, end: end})
+	}
+	result := make([]netip.Prefix, 0, len(prefixes))
+	for _, item := range intervals {
+		var raw [4]byte
+		binary.BigEndian.PutUint32(raw[:], uint32(item.start))
+		collapsed, err := rangeToPrefixes(netip.AddrFrom4(raw), item.end-item.start)
+		if err == nil {
+			result = append(result, collapsed...)
+		}
+	}
+	return normalizePrefixes(result)
+}
+
+func largestPrefixes(prefixes []netip.Prefix, limit int) []netip.Prefix {
+	if len(prefixes) <= limit {
+		return prefixes
+	}
+	result := append([]netip.Prefix(nil), prefixes...)
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Bits() == result[j].Bits() {
+			left, right := result[i].Addr().As4(), result[j].Addr().As4()
+			return binary.BigEndian.Uint32(left[:]) < binary.BigEndian.Uint32(right[:])
+		}
+		return result[i].Bits() < result[j].Bits()
+	})
+	return normalizePrefixes(result[:limit])
 }
 
 func renderNoRoutes(prefixes []netip.Prefix) []byte {

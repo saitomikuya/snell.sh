@@ -93,6 +93,9 @@ func TestAnyConnectCannotBeShadowTLSBackend(t *testing.T) {
 func TestAnyConnectDefaultsAndValidation(t *testing.T) {
 	req := anyConnectRequest("VPN", "192.168.144.0/24", 443)
 	req.RuntimeVersion = ""
+	req.Config.DNS = ""
+	req.Config.ChinaCIDRSourceURL = ""
+	req.Config.ChinaCIDRSourceFormat = ""
 	if err := Validate(req); err != nil {
 		t.Fatal(err)
 	}
@@ -100,8 +103,19 @@ func TestAnyConnectDefaultsAndValidation(t *testing.T) {
 	if req.RuntimeVersion != "v1.5.0" {
 		t.Fatalf("runtime default = %q", req.RuntimeVersion)
 	}
+	if req.Config.DNS != "1.1.1.1,8.8.8.8" || req.Config.ChinaDirectDNS != DefaultChinaDirectDNS || req.Config.ChinaCIDRSourceURL != DefaultChinaCIDRSource || req.Config.ChinaCIDRSourceFormat != "apnic" {
+		t.Fatalf("unexpected ChinaDirect defaults: %+v", req.Config)
+	}
 	req.Config.CertificateURL = "http://certs.example.com/server.pem"
 	if err := Validate(req); err == nil {
 		t.Fatal("expected non-HTTPS certificate URL rejection")
+	}
+}
+
+func TestRoutingDefaultsDoNotChangeCustomSources(t *testing.T) {
+	custom := Config{ChinaCIDRSourceURL: "https://routes.example.com/cn.txt", ChinaCIDRSourceFormat: "cidr"}
+	normalizeAnyConnectRouting(&custom)
+	if custom.ChinaCIDRSourceURL != "https://routes.example.com/cn.txt" || custom.ChinaCIDRSourceFormat != "cidr" {
+		t.Fatalf("custom route source changed unexpectedly: %+v", custom)
 	}
 }

@@ -443,6 +443,9 @@ func scanNode(row scanner) (Node, error) {
 	if err := json.Unmarshal([]byte(cfg), &n.Config); err != nil {
 		return Node{}, err
 	}
+	if n.Type == "anyconnect" {
+		normalizeAnyConnectRouting(&n.Config)
+	}
 	return n, nil
 }
 func nullString(v string) any {

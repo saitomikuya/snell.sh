@@ -38,7 +38,7 @@ func (s *Service) PrepareConfig(ctx context.Context, node nodes.Node) (string, e
 	if err = os.MkdirAll(groupDir, 0750); err != nil {
 		return "", err
 	}
-	if err = os.WriteFile(filepath.Join(groupDir, "FullTunnel"), []byte("# Full tunnel inherits route = default.\n"), 0640); err != nil {
+	if err = os.WriteFile(filepath.Join(groupDir, "FullTunnel"), []byte("# Full tunnel inherits route = default.\ntunnel-all-dns = true\n"), 0640); err != nil {
 		return "", err
 	}
 	chinaRoutes, err := os.ReadFile(s.ChinaRoutesPath(node.ID))
@@ -48,7 +48,8 @@ func (s *Service) PrepareConfig(ctx context.Context, node nodes.Node) (string, e
 	if len(chinaRoutes) == 0 {
 		return "", errors.New("中国直连路由列表为空")
 	}
-	if err = os.WriteFile(filepath.Join(groupDir, "ChinaDirect"), chinaRoutes, 0640); err != nil {
+	chinaDirect := renderChinaDirectGroup(chinaRoutes, node.Config.ChinaDirectDNS)
+	if err = os.WriteFile(filepath.Join(groupDir, "ChinaDirect"), chinaDirect, 0640); err != nil {
 		return "", err
 	}
 	passwordFile, err := s.renderPasswordFile(ctx, users)
@@ -107,6 +108,9 @@ func (s *Service) Remove(nodeID string) error {
 		filepath.Join(s.dataDir, "config", "anyconnect", nodeID),
 		filepath.Join(s.dataDir, "config", "anyconnect", nodeID+".last-good"),
 		filepath.Join(s.dataDir, "anyconnect", "assets", nodeID),
+		s.runtimeDir(nodeID),
+		// Clean up the location used before AnyConnect runtime sockets were
+		// moved outside the private persistent data directory.
 		filepath.Join(s.dataDir, "runtime", "anyconnect", nodeID),
 	} {
 		if err := os.RemoveAll(path); err != nil {
@@ -163,9 +167,21 @@ func (s *Service) renderConfig(node nodes.Node, finalConfigDir string) ([]byte, 
 		return nil, errors.New("VPN 地址池无效")
 	}
 	mask := net.CIDRMask(prefix.Bits(), 32)
-	runtimeDir := filepath.Join(s.dataDir, "runtime", "anyconnect", node.ID)
-	if err = os.MkdirAll(runtimeDir, 0750); err != nil {
-		return nil, err
+	runtimeDir := s.runtimeDir(node.ID)
+	// ocserv creates the sec-mod socket as run-as-user, while this directory is
+	// prepared by the root agent. Workers need search permission on every parent
+	// directory to reach that socket. Keep directory listings private, but allow
+	// the unprivileged worker to traverse the node-specific runtime directory.
+	const runtimeDirectoryMode = 0711
+	for _, path := range []string{filepath.Dir(runtimeDir), runtimeDir} {
+		if err = os.MkdirAll(path, runtimeDirectoryMode); err != nil {
+			return nil, err
+		}
+		// MkdirAll preserves existing modes. Chmod repairs an older runtime root
+		// without exposing the persistent /data directory that stores secrets.
+		if err = os.Chmod(path, runtimeDirectoryMode); err != nil {
+			return nil, err
+		}
 	}
 	deviceID := strings.ReplaceAll(node.ID, "-", "")
 	if len(deviceID) > 8 {
@@ -214,4 +230,25 @@ func (s *Service) renderConfig(node nodes.Node, finalConfigDir string) ([]byte, 
 		lines = append(lines, "dns = "+strings.TrimSpace(dns))
 	}
 	return []byte(strings.Join(lines, "\n") + "\n"), nil
+}
+
+func (s *Service) runtimeDir(nodeID string) string {
+	root := strings.TrimSpace(os.Getenv("PANEL_ANYCONNECT_RUNTIME_DIR"))
+	if root == "" {
+		root = "/run/proxy-panel/anyconnect"
+	}
+	return filepath.Join(root, nodeID)
+}
+
+func renderChinaDirectGroup(routes []byte, dnsList string) []byte {
+	result := []byte("# Resolve and route excluded destinations through the client's local network.\ntunnel-all-dns = false\n")
+	if strings.TrimSpace(dnsList) == "" {
+		dnsList = nodes.DefaultChinaDirectDNS
+	}
+	for _, dns := range strings.Split(dnsList, ",") {
+		dns = strings.TrimSpace(dns)
+		result = append(result, []byte("dns = "+dns+"\n")...)
+		result = append(result, []byte("no-route = "+dns+"/255.255.255.255\n")...)
+	}
+	return append(result, routes...)
 }

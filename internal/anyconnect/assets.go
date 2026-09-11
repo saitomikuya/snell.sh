@@ -50,12 +50,21 @@ func (s *Service) Ensure(ctx context.Context, node nodes.Node) error {
 			return fmt.Errorf("准备 AnyConnect 证书: %w", err)
 		}
 	}
-	if _, err := os.Stat(s.ChinaRoutesPath(node.ID)); err != nil {
-		if _, err = s.RefreshCIDRs(ctx, node); err != nil {
+	if !chinaRoutesUsable(s.ChinaRoutesPath(node.ID)) {
+		if _, err := s.RefreshCIDRs(ctx, node); err != nil {
 			return fmt.Errorf("准备中国 CIDR: %w", err)
 		}
 	}
 	return nil
+}
+
+func chinaRoutesUsable(path string) bool {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	_, err = ParseChinaCIDRs(content, "cidr")
+	return err == nil
 }
 
 func (s *Service) CertificatePath(nodeID string) string {

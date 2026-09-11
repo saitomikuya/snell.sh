@@ -1,8 +1,10 @@
 package anyconnect
 
 import (
+	"fmt"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +29,82 @@ func TestParseAPNICRangeAndRenderNoRoutes(t *testing.T) {
 func TestCIDRParserRejectsSuspiciouslySmallDataSet(t *testing.T) {
 	if _, err := ParseChinaCIDRs([]byte("1.0.1.0/24\n"), "cidr"); err == nil {
 		t.Fatal("expected the data-set size guard to reject one prefix")
+	}
+}
+
+func TestCIDRParserAcceptsOcservNoRouteNetmasks(t *testing.T) {
+	var source strings.Builder
+	for index := 0; index < 100; index++ {
+		fmt.Fprintf(&source, "no-route = 11.%d.0.0/255.254.0.0\n", index*2)
+	}
+	prefixes, err := ParseChinaCIDRs([]byte("\ufeff"+source.String()), "cidr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prefixes) != 100 || prefixes[0].String() != "11.0.0.0/15" || prefixes[99].String() != "11.198.0.0/15" {
+		t.Fatalf("unexpected ocserv routes: first=%v last=%v count=%d", prefixes[0], prefixes[len(prefixes)-1], len(prefixes))
+	}
+	path := filepath.Join(t.TempDir(), "china-routes.conf")
+	if err = os.WriteFile(path, []byte(source.String()), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if !chinaRoutesUsable(path) {
+		t.Fatal("validated cached route file was rejected")
+	}
+}
+
+func TestCoarseRouteSourceExcludesSpecialUseSubnets(t *testing.T) {
+	prefixes := excludeSpecialUsePrefixes([]netip.Prefix{netip.MustParsePrefix("203.0.0.0/8")})
+	for _, prefix := range prefixes {
+		if prefix.Contains(netip.MustParseAddr("203.0.113.1")) {
+			t.Fatalf("documentation range leaked through coarse route sanitizing: %s", prefix)
+		}
+	}
+	if len(prefixes) < 2 {
+		t.Fatalf("coarse public prefix was not split around special-use space: %v", prefixes)
+	}
+}
+
+func TestCIDRParserRejectsRoutesAboveCiscoClientLimit(t *testing.T) {
+	var source strings.Builder
+	for index := 0; index <= maxChinaCIDRRoutes; index++ {
+		fmt.Fprintf(&source, "%d.%d.0.0/18\n", 20+index/256, index%256)
+	}
+	if _, err := ParseChinaCIDRs([]byte(source.String()), "cidr"); err == nil || !strings.Contains(err.Error(), "Cisco Secure Client") {
+		t.Fatalf("expected Cisco route-limit error, got %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "china-routes.conf")
+	if err := os.WriteFile(path, []byte(source.String()), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if chinaRoutesUsable(path) {
+		t.Fatal("oversized cached route file was accepted")
+	}
+}
+
+func TestAPNICRoutesAreCollapsedAndCappedForCiscoClients(t *testing.T) {
+	var source strings.Builder
+	for index := 0; index <= maxChinaCIDRRoutes; index++ {
+		fmt.Fprintf(&source, "apnic|CN|ipv4|%d.%d.0.0|16384|20260911|allocated\n", 20+index/256, index%256)
+	}
+	prefixes, err := ParseChinaCIDRs([]byte(source.String()), "apnic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prefixes) != maxChinaCIDRRoutes {
+		t.Fatalf("APNIC routes = %d, want route limit %d", len(prefixes), maxChinaCIDRRoutes)
+	}
+	for _, prefix := range prefixes {
+		if prefix.Bits() != 18 {
+			t.Fatalf("APNIC limiting broadened a route: %s", prefix)
+		}
+	}
+	collapsed := collapsePrefixes([]netip.Prefix{
+		netip.MustParsePrefix("30.0.0.0/9"),
+		netip.MustParsePrefix("30.128.0.0/9"),
+	})
+	if len(collapsed) != 1 || collapsed[0].String() != "30.0.0.0/8" {
+		t.Fatalf("adjacent prefixes were not losslessly collapsed: %v", collapsed)
 	}
 }
 
@@ -81,6 +159,12 @@ func TestScheduleDueDailyAndWeekly(t *testing.T) {
 
 func TestRenderConfigKeepsCapabilityBoundaryAndRouteGroups(t *testing.T) {
 	service := &Service{dataDir: t.TempDir()}
+	runtimeRoot := filepath.Join(t.TempDir(), "ocserv-runtime")
+	t.Setenv("PANEL_ANYCONNECT_RUNTIME_DIR", runtimeRoot)
+	runtimeDir := filepath.Join(runtimeRoot, "12345678-abcd")
+	if err := os.MkdirAll(runtimeDir, 0750); err != nil {
+		t.Fatal(err)
+	}
 	node := nodes.Node{ID: "12345678-abcd", Type: "anyconnect", ListenHost: "0.0.0.0", ListenPort: 443, Config: nodes.Config{VPNNetwork: "192.168.144.0/24", DNS: "1.1.1.1,8.8.8.8", MTU: 1340, MaxClients: 32, MaxSameClients: 2, UDPEnabled: true}}
 	config, err := service.renderConfig(node, "/data/config/anyconnect/node")
 	if err != nil {
@@ -94,5 +178,22 @@ func TestRenderConfigKeepsCapabilityBoundaryAndRouteGroups(t *testing.T) {
 	}
 	if prefix, _ := netip.ParsePrefix("192.168.144.0/24"); !strings.Contains(text, "ipv4-network = "+prefix.Addr().String()) {
 		t.Fatal("VPN network was not rendered")
+	}
+	info, err := os.Stat(runtimeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0711 {
+		t.Fatalf("runtime directory permissions = %#o, want 0711", got)
+	}
+	if !strings.Contains(text, "socket-file = "+filepath.Join(runtimeDir, "ocserv.socket")) {
+		t.Fatalf("sec-mod socket was not moved to the dedicated runtime directory:\n%s", text)
+	}
+	if strings.Contains(text, filepath.Join(service.dataDir, "runtime", "anyconnect")) {
+		t.Fatalf("configuration still places worker sockets below the private data directory:\n%s", text)
+	}
+	group := string(renderChinaDirectGroup([]byte("no-route = 11.0.0.0/255.0.0.0\n"), "223.5.5.5,119.29.29.29"))
+	if !strings.Contains(group, "tunnel-all-dns = false") || !strings.Contains(group, "dns = 223.5.5.5") || !strings.Contains(group, "no-route = 223.5.5.5/255.255.255.255") || !strings.Contains(group, "dns = 119.29.29.29") || !strings.Contains(group, "no-route = 119.29.29.29/255.255.255.255") || !strings.Contains(group, "no-route = 11.0.0.0/255.0.0.0") {
+		t.Fatalf("ChinaDirect group does not split DNS and routes: %s", group)
 	}
 }
