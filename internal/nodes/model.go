@@ -57,6 +57,8 @@ type Config struct {
 	ChinaCIDRSchedule       string `json:"chinaCidrSchedule,omitempty"`
 	ChinaCIDRScheduleDay    int    `json:"chinaCidrScheduleDay,omitempty"`
 	ChinaCIDRScheduleTime   string `json:"chinaCidrScheduleTime,omitempty"`
+	ProfileEnabled          bool   `json:"profileEnabled,omitempty"`
+	ProfileEntries          string `json:"profileEntries,omitempty"`
 }
 
 type CreateRequest struct {

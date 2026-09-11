@@ -102,6 +102,8 @@ func (s *Server) Handler() http.Handler {
 				r.Get("/settings", s.getSettings)
 				r.Group(func(r chi.Router) {
 					r.Use(s.requireCSRF)
+					r.Post("/sync/export", s.exportSync)
+					r.Post("/sync/import", s.importSync)
 					r.Put("/traffic/{id}/quota", s.setQuota)
 					r.Post("/traffic/{id}/pause", s.pauseTraffic)
 					r.Post("/traffic/{id}/resume", s.resumeTraffic)

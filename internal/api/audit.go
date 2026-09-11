@@ -39,6 +39,8 @@ var auditActionLabels = map[string]string{
 	"update.check":                 "检查上游版本",
 	"update.apply":                 "一键更新运行时",
 	"update.upload":                "上传并适配运行时",
+	"sync.export":                  "导出节点与用户配置",
+	"sync.import":                  "导入节点与用户配置",
 }
 
 var auditTargetLabels = map[string]string{
@@ -48,6 +50,7 @@ var auditTargetLabels = map[string]string{
 	"update":   "更新组件",
 	"project":  "整个项目",
 	"settings": "系统设置",
+	"sync":     "跨服务器同步",
 }
 
 func auditJSON(values map[string]any) string {

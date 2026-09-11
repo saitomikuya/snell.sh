@@ -34,6 +34,7 @@ sudo docker run -d --name proxy-panel --pull=always --restart unless-stopped --n
 - SQLite WAL、版本化迁移、主密钥 AES-256-GCM 加密节点秘密。
 - Snell、SS-2022、ShadowTLS、AnyConnect 节点数据模型、CRUD、依赖和 TCP/UDP 端口冲突校验。
 - 多 AnyConnect 节点、用户名/密码认证、逐用户“全隧道 / 中国直连 / 登录时选择”路由组、可配置容量和 Cisco Secure Client/OpenConnect 连接信息。
+- AnyConnect `profile.xml` 可选节点列表下发；支持在独立部署的面板之间导出/导入节点及用户配置，并自动创建导入前备份。
 - 证书中心 HTTPS 拉取、Basic Auth、证书链/域名/有效期/私钥匹配校验、原子切换，以及每天/每周定时更新和手动刷新。
 - Cisco 路由上限适配的 APNIC 中国 IPv4 筛选，可选粗粒度 `no-route` 或纯 CIDR 数据源，以及解析防护、原子切换和定时更新。
 - Web 与 Agent 之间的 Unix Socket 类型化 RPC；没有任意 Shell 或路径读写接口。

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"regexp"
 	"strconv"
 
 	"github.com/google/uuid"
@@ -146,6 +147,23 @@ func (s *Store) migrateDefaultSnellListen(ctx context.Context) error {
 func (s *Store) Create(ctx context.Context, req CreateRequest, source string) (Node, error) {
 	return s.createWithID(ctx, uuid.NewString(), req, source)
 }
+
+// CreateWithID is used by portable configuration imports. Keeping the source
+// ID when possible makes independently deployed panels converge on the same
+// node IDs and keeps ShadowTLS backend references stable.
+func (s *Store) CreateWithID(ctx context.Context, id string, req CreateRequest, source string) (Node, error) {
+	if !nodeIDPattern.MatchString(id) {
+		return Node{}, errors.New("节点 ID 格式无效")
+	}
+	return s.createWithID(ctx, id, req, source)
+}
+
+func (s *Store) FindByNameType(ctx context.Context, kind, name string) (Node, error) {
+	return scanNode(s.db.QueryRowContext(ctx, queryNode+` WHERE n.type=? AND n.name=? ORDER BY n.created_at LIMIT 1`, kind, name))
+}
+
+var nodeIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
 func (s *Store) createWithID(ctx context.Context, id string, req CreateRequest, source string) (Node, error) {
 	Normalize(&req)
 	if err := Validate(req); err != nil {

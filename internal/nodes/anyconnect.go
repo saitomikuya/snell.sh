@@ -216,6 +216,13 @@ func validateAnyConnectUser(req AnyConnectUserRequest, requirePassword bool) err
 	return nil
 }
 
+// ValidateAnyConnectUserRequest exposes the same validation used by the
+// CRUD methods so bulk imports can reject malformed files before mutating the
+// local database.
+func ValidateAnyConnectUserRequest(req AnyConnectUserRequest) error {
+	return validateAnyConnectUser(req, true)
+}
+
 func boolInt(value bool) int {
 	if value {
 		return 1

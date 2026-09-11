@@ -67,6 +67,10 @@ func (s *Service) PrepareConfig(ctx context.Context, node nodes.Node) (string, e
 	if err = os.WriteFile(filepath.Join(candidate, "ocserv.conf"), config, 0640); err != nil {
 		return "", err
 	}
+	profile, err := profileForNode(node)
+	if err != nil {
+		return "", err
+	}
 	lastGood := target + ".last-good"
 	_ = os.RemoveAll(lastGood)
 	if _, statErr := os.Stat(target); statErr == nil {
@@ -77,6 +81,23 @@ func (s *Service) PrepareConfig(ctx context.Context, node nodes.Node) (string, e
 	if err = os.Rename(candidate, target); err != nil {
 		_ = os.Rename(lastGood, target)
 		return "", err
+	}
+	profilePath := filepath.Join(s.runtimeDir(node.ID), "profile.xml")
+	if profile == nil {
+		_ = os.Remove(profilePath)
+	} else {
+		profileData, renderErr := renderProfile(profile)
+		if renderErr != nil {
+			return "", renderErr
+		}
+		temporary := profilePath + ".tmp"
+		if err = os.WriteFile(temporary, profileData, 0644); err != nil {
+			return "", err
+		}
+		if err = os.Rename(temporary, profilePath); err != nil {
+			_ = os.Remove(temporary)
+			return "", err
+		}
 	}
 	return filepath.Join(target, "ocserv.conf"), nil
 }
@@ -222,6 +243,12 @@ func (s *Service) renderConfig(node nodes.Node, finalConfigDir string) ([]byte, 
 		"predictable-ips = false",
 		"try-mtu-discovery = false",
 		"stats-report-time = 60",
+	}
+	if _, err = profileForNode(node); err != nil {
+		return nil, err
+	}
+	if node.Config.ProfileEnabled {
+		lines = append(lines, "user-profile = "+filepath.Join(runtimeDir, "profile.xml"))
 	}
 	if !node.Config.UDPEnabled {
 		lines = append(lines, "no-udp = true")

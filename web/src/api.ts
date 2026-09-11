@@ -1,5 +1,5 @@
 export type NodeType = 'snell' | 'ss2022' | 'shadowtls' | 'anyconnect'
-export interface NodeConfig { version?: string; dns?: string; chinaDirectDns?:string; ipv6?: boolean; tfo?: boolean; public?: boolean; mode?: string; method?: string; obfs?: string; obfsHost?: string; blockMainland?: boolean; sni?: string; wildcardSni?: string; udpEnabled?:boolean; serverName?:string; vpnNetwork?:string; mtu?:number; maxClients?:number; maxSameClients?:number; certificateUrl?:string; privateKeyUrl?:string; certificateUsername?:string; certificateSchedule?:string; certificateScheduleDay?:number; certificateScheduleTime?:string; chinaCidrSourceUrl?:string; chinaCidrSourceFormat?:string; chinaCidrSchedule?:string; chinaCidrScheduleDay?:number; chinaCidrScheduleTime?:string }
+export interface NodeConfig { version?: string; dns?: string; chinaDirectDns?:string; ipv6?: boolean; tfo?: boolean; public?: boolean; mode?: string; method?: string; obfs?: string; obfsHost?: string; blockMainland?: boolean; sni?: string; wildcardSni?: string; udpEnabled?:boolean; serverName?:string; vpnNetwork?:string; mtu?:number; maxClients?:number; maxSameClients?:number; certificateUrl?:string; privateKeyUrl?:string; certificateUsername?:string; certificateSchedule?:string; certificateScheduleDay?:number; certificateScheduleTime?:string; chinaCidrSourceUrl?:string; chinaCidrSourceFormat?:string; chinaCidrSchedule?:string; chinaCidrScheduleDay?:number; chinaCidrScheduleTime?:string; profileEnabled?:boolean; profileEntries?:string }
 export interface Node { id:string; type:NodeType; name:string; enabled:boolean; desiredState:string; runtimeVersion:string; listenHost:string; listenPort:number; backendNodeId?:string; config:NodeConfig; revision:number; actualState:string; lastError?:string; createdAt:string; updatedAt:string }
 export interface NodeInput { type?:NodeType; name:string; runtimeVersion:string; listenHost:string; listenPort:number; backendNodeId?:string; config:NodeConfig; secret?:string; certificatePassword?:string; privateKeyPassphrase?:string }
 export interface Traffic { nodeId:string; period:string; uploadBytes:number; downloadBytes:number; quotaBytes:number; resetDay:number; paused:boolean; pausedByQuota:boolean; updatedAt:string }
@@ -15,14 +15,14 @@ export interface AnyConnectAssetState { nodeId:string; certificateLastAttempt:st
 export interface UpdateComponent { key:string; name:string; category:'runtime'; currentVersion:string; latestVersion:string; compatibleVersion?:string; updateAvailable:boolean; compatible:boolean; canApply:boolean; sourceUrl:string; message:string }
 export interface UpdateStatus { panelVersion:string; architecture:string; checkedAt:string; compatible:boolean; message:string; components:UpdateComponent[]; adapter:{schemaVersion:number} }
 
-function csrf(): string { return document.cookie.split('; ').find(v => v.startsWith('panel_csrf='))?.split('=')[1] ?? '' }
+export function csrfToken(): string { return document.cookie.split('; ').find(v => v.startsWith('panel_csrf='))?.split('=')[1] ?? '' }
 export class APIError extends Error { constructor(public code:string, message:string, public status:number){super(message)} }
 export async function api<T>(path:string, options:RequestInit={}):Promise<T>{
   const method=(options.method ?? 'GET').toUpperCase();
   const headers=new Headers(options.headers);
   const formData=typeof FormData!=='undefined' && options.body instanceof FormData;
   if(options.body && !formData) headers.set('Content-Type','application/json');
-  if(!['GET','HEAD','OPTIONS'].includes(method)) headers.set('X-CSRF-Token',decodeURIComponent(csrf()));
+  if(!['GET','HEAD','OPTIONS'].includes(method)) headers.set('X-CSRF-Token',decodeURIComponent(csrfToken()));
   const response=await fetch('/api/v1'+path,{...options,headers,credentials:'same-origin'});
   if(response.status===204) return undefined as T;
   const body=await response.json().catch(()=>({}));
