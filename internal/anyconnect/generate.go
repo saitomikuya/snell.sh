@@ -98,6 +98,14 @@ func (s *Service) PrepareConfig(ctx context.Context, node nodes.Node) (string, e
 			_ = os.Remove(temporary)
 			return "", err
 		}
+		// The panel agent normally runs with a restrictive umask (027), which
+		// would turn the requested 0644 mode into 0640. ocserv drops its HTTP
+		// worker to `nobody`, so the profile must remain world-readable after
+		// the atomic rename; otherwise Cisco Secure Client gets a download
+		// failure even though the file exists.
+		if err = os.Chmod(profilePath, 0644); err != nil {
+			return "", err
+		}
 	}
 	return filepath.Join(target, "ocserv.conf"), nil
 }
