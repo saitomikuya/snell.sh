@@ -217,6 +217,10 @@ func (m *Manager) startLockedWithRestarts(id string, restarts int) (Result, erro
 	cmd := exec.CommandContext(ctx, binary, args...)
 	if node.Type == "shadowtls" {
 		cmd.Env = append(os.Environ(), "MONOIO_FORCE_LEGACY_DRIVER=1", "RUST_LOG=warn")
+	} else if node.Type == "anyconnect" {
+		// user-profile is intentionally a basename so ocserv advertises a valid
+		// /profiles/profile.xml URI. Resolve it from the isolated runtime dir.
+		cmd.Dir = m.anyconnect.RuntimeDir(node.ID)
 	}
 	cmd.SysProcAttr = childProcessAttributes()
 	stdout, err := cmd.StdoutPipe()
@@ -610,6 +614,7 @@ func (m *Manager) validateAnyConnectConfig(node nodes.Node, path string) error {
 		return fmt.Errorf("runtime missing: %s", binary)
 	}
 	command := exec.Command(binary, "--config", path, "--test-config")
+	command.Dir = m.anyconnect.RuntimeDir(node.ID)
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("ocserv configuration validation failed: %s", runtimelog.Redact(strings.TrimSpace(string(output))))
 	}

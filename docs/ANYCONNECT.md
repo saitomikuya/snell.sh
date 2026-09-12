@@ -43,7 +43,9 @@ sysctl net.ipv4.ip_forward
 美国西海岸 | us.example.com:443
 ```
 
-保存时面板会自动把当前节点放在第一项，并在 ocserv 配置中启用 `user-profile`。Cisco Secure Client 可在连接页选择列表中的其他服务器；各独立服务器面板手动填写相同文本即可保持列表一致。列表只影响客户端服务器选择，不改变 AnyConnect 用户的全隧道/中国直连路由组。
+保存时面板会自动把当前节点放在第一项，并在 ocserv 配置中启用官方的 `user-profile` 下载流程。Cisco Secure Client 首次成功连接后会从服务端下载 `/profiles/profile.xml` 并保存到本机；下次打开客户端时，连接下拉菜单会显示列表中的服务器。各独立服务器面板手动填写相同文本即可保持列表一致。列表只影响客户端服务器选择，不改变 AnyConnect 用户的全隧道/中国直连路由组。
+
+如果手机提示“无法下载 AnyConnect 配置文件”，先确认节点已重新“验证并应用”且日志中没有 `cannot load config file` 或 `error sending file`；面板会让 ocserv 在节点运行目录中以相对文件名提供 `profile.xml`，不要手工把 `user-profile` 改成 `/data/...` 的绝对路径。
 
 ### 独立服务器同步
 

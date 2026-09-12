@@ -248,7 +248,10 @@ func (s *Service) renderConfig(node nodes.Node, finalConfigDir string) ([]byte, 
 		return nil, err
 	}
 	if node.Config.ProfileEnabled {
-		lines = append(lines, "user-profile = "+filepath.Join(runtimeDir, "profile.xml"))
+		// ocserv embeds this value in the client's /profiles/<value> download
+		// URI and opens it relative to its working directory. Keep it to a safe
+		// basename; the agent starts ocserv inside the node runtime directory.
+		lines = append(lines, "user-profile = profile.xml")
 	}
 	if !node.Config.UDPEnabled {
 		lines = append(lines, "no-udp = true")
@@ -265,6 +268,12 @@ func (s *Service) runtimeDir(nodeID string) string {
 		root = "/run/proxy-panel/anyconnect"
 	}
 	return filepath.Join(root, nodeID)
+}
+
+// RuntimeDir returns the per-node working directory used by ocserv for its
+// sockets and the downloadable profile.xml file.
+func (s *Service) RuntimeDir(nodeID string) string {
+	return s.runtimeDir(nodeID)
 }
 
 func renderChinaDirectGroup(routes []byte, dnsList string) []byte {

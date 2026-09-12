@@ -49,7 +49,10 @@ func TestRenderConfigReferencesProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(config), "user-profile = "+service.runtimeDir(node.ID)+"/profile.xml") {
+	if !strings.Contains(string(config), "user-profile = profile.xml") {
 		t.Fatalf("profile path missing from ocserv config: %s", config)
+	}
+	if strings.Contains(string(config), "user-profile = /") {
+		t.Fatalf("profile must be advertised as a basename, not an absolute path: %s", config)
 	}
 }
