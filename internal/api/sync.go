@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -31,34 +30,29 @@ func (s *Server) exportSync(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]nodesync.Node, 0, len(list))
 	for _, node := range list {
+		if node.Type != "anyconnect" {
+			continue
+		}
 		item := nodesync.Node{ID: node.ID, Type: node.Type, Name: node.Name, DesiredState: node.DesiredState, RuntimeVersion: node.RuntimeVersion, ListenHost: node.ListenHost, ListenPort: node.ListenPort, BackendNodeID: node.BackendNodeID, Config: node.Config}
-		if node.Type == "anyconnect" {
-			secrets, secretErr := s.nodes.AnyConnectSecrets(r.Context(), node.ID)
-			if secretErr != nil {
-				internal(w, secretErr)
+		secrets, secretErr := s.nodes.AnyConnectSecrets(r.Context(), node.ID)
+		if secretErr != nil {
+			internal(w, secretErr)
+			return
+		}
+		item.AnyConnectSecrets = &secrets
+		users, userErr := s.nodes.ListAnyConnectUsers(r.Context(), node.ID)
+		if userErr != nil {
+			internal(w, userErr)
+			return
+		}
+		item.Users = make([]nodesync.User, 0, len(users))
+		for _, user := range users {
+			password, passwordErr := s.nodes.AnyConnectUserPassword(r.Context(), user.ID)
+			if passwordErr != nil {
+				internal(w, passwordErr)
 				return
 			}
-			item.AnyConnectSecrets = &secrets
-			users, userErr := s.nodes.ListAnyConnectUsers(r.Context(), node.ID)
-			if userErr != nil {
-				internal(w, userErr)
-				return
-			}
-			item.Users = make([]nodesync.User, 0, len(users))
-			for _, user := range users {
-				password, passwordErr := s.nodes.AnyConnectUserPassword(r.Context(), user.ID)
-				if passwordErr != nil {
-					internal(w, passwordErr)
-					return
-				}
-				item.Users = append(item.Users, nodesync.User{Username: user.Username, Password: password, RouteGroup: user.RouteGroup, Enabled: user.Enabled})
-			}
-		} else {
-			item.Secret, err = s.nodes.Secret(r.Context(), node.ID)
-			if err != nil {
-				internal(w, err)
-				return
-			}
+			item.Users = append(item.Users, nodesync.User{Username: user.Username, Password: password, RouteGroup: user.RouteGroup, Enabled: user.Enabled})
 		}
 		items = append(items, item)
 	}
@@ -67,12 +61,12 @@ func (s *Server) exportSync(w http.ResponseWriter, r *http.Request) {
 		internal(w, err)
 		return
 	}
-	filename := "proxy-panel-sync-" + time.Now().UTC().Format("20060102T150405Z") + ".json"
+	filename := "proxy-panel-anyconnect-sync-" + time.Now().UTC().Format("20060102T150405Z") + ".json"
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
-	s.store.Audit(r.Context(), "sync.export", "sync", "all", remoteIP(r), auditJSON(map[string]any{"nodes": len(items)}), true)
+	s.store.Audit(r.Context(), "sync.export", "sync", "anyconnect", remoteIP(r), auditJSON(map[string]any{"nodes": len(items), "type": "anyconnect"}), true)
 }
 
 func (s *Server) importSync(w http.ResponseWriter, r *http.Request) {
@@ -110,40 +104,23 @@ func (s *Server) importSync(w http.ResponseWriter, r *http.Request) {
 	result, err := s.applySyncImport(r, payload, replaceUsers)
 	result.PreBackupID = preBackup.ID
 	if err != nil {
-		s.store.Audit(r.Context(), "sync.import", "sync", "all", remoteIP(r), auditJSON(map[string]any{"backupId": preBackup.ID, "error": err.Error()}), false)
+		s.store.Audit(r.Context(), "sync.import", "sync", "anyconnect", remoteIP(r), auditJSON(map[string]any{"backupId": preBackup.ID, "error": err.Error()}), false)
 		writeError(w, 409, "SYNC_IMPORT_FAILED", fmt.Sprintf("导入未完成（已创建备份 %s）：%v", preBackup.ID, err))
 		return
 	}
-	s.store.Audit(r.Context(), "sync.import", "sync", "all", remoteIP(r), auditJSON(map[string]any{"backupId": preBackup.ID, "nodesCreated": result.NodesCreated, "nodesUpdated": result.NodesUpdated, "usersCreated": result.UsersCreated, "usersUpdated": result.UsersUpdated, "replaceUsers": replaceUsers}), true)
+	s.store.Audit(r.Context(), "sync.import", "sync", "anyconnect", remoteIP(r), auditJSON(map[string]any{"backupId": preBackup.ID, "nodesCreated": result.NodesCreated, "nodesUpdated": result.NodesUpdated, "usersCreated": result.UsersCreated, "usersUpdated": result.UsersUpdated, "replaceUsers": replaceUsers}), true)
 	writeJSON(w, 200, result)
 }
 
 func (s *Server) applySyncImport(r *http.Request, payload nodesync.File, replaceUsers bool) (syncImportResult, error) {
 	ctx := r.Context()
-	ordered := append([]nodesync.Node(nil), payload.Nodes...)
-	sort.SliceStable(ordered, func(i, j int) bool {
-		left, right := 0, 0
-		if ordered[i].Type == "shadowtls" {
-			left = 1
-		}
-		if ordered[j].Type == "shadowtls" {
-			right = 1
-		}
-		return left < right
-	})
-	localIDs := make(map[string]string, len(ordered))
-	changed := make([]string, 0, len(ordered))
+	localIDs := make(map[string]string, len(payload.Nodes))
+	changed := make([]string, 0, len(payload.Nodes))
 	result := syncImportResult{}
-	for _, item := range ordered {
+	for _, item := range payload.Nodes {
 		local, found, err := s.findSyncTarget(ctx, item)
 		if err != nil {
 			return result, err
-		}
-		if item.Type == "shadowtls" {
-			item.BackendNodeID = localIDs[item.BackendNodeID]
-			if item.BackendNodeID == "" {
-				return result, fmt.Errorf("ShadowTLS 节点 %s 的后端节点尚未导入", item.Name)
-			}
 		}
 		req := syncCreateRequest(item)
 		if err = nodes.Validate(req); err != nil {
@@ -253,24 +230,16 @@ func syncCreateRequest(item nodesync.Node) nodes.CreateRequest {
 }
 
 func validateSyncPayload(payload nodesync.File) error {
-	ids := make(map[string]struct{}, len(payload.Nodes))
 	for _, item := range payload.Nodes {
-		ids[item.ID] = struct{}{}
+		if item.Type != "anyconnect" {
+			return fmt.Errorf("同步文件只支持 AnyConnect 节点（收到 %s）", item.Type)
+		}
 		if err := nodes.Validate(syncCreateRequest(item)); err != nil {
 			return fmt.Errorf("节点 %s 校验失败：%w", item.Name, err)
 		}
-		if item.Type == "anyconnect" {
-			for _, user := range item.Users {
-				if err := nodes.ValidateAnyConnectUserRequest(nodes.AnyConnectUserRequest{Username: user.Username, Password: user.Password, RouteGroup: user.RouteGroup, Enabled: user.Enabled}); err != nil {
-					return fmt.Errorf("AnyConnect 节点 %s 用户 %s 校验失败：%w", item.Name, user.Username, err)
-				}
-			}
-		}
-	}
-	for _, item := range payload.Nodes {
-		if item.Type == "shadowtls" {
-			if _, ok := ids[item.BackendNodeID]; !ok {
-				return fmt.Errorf("ShadowTLS 节点 %s 的后端节点不在同步文件中", item.Name)
+		for _, user := range item.Users {
+			if err := nodes.ValidateAnyConnectUserRequest(nodes.AnyConnectUserRequest{Username: user.Username, Password: user.Password, RouteGroup: user.RouteGroup, Enabled: user.Enabled}); err != nil {
+				return fmt.Errorf("AnyConnect 节点 %s 用户 %s 校验失败：%w", item.Name, user.Username, err)
 			}
 		}
 	}

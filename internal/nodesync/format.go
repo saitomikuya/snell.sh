@@ -1,5 +1,5 @@
 // Package nodesync defines the portable, human-readable configuration file
-// used to copy nodes and AnyConnect users between independent panels.
+// used to copy AnyConnect nodes and users between independent panels.
 package nodesync
 
 import (
@@ -99,10 +99,10 @@ func Validate(value File) error {
 			return fmt.Errorf("节点 ID 重复：%s", item.ID)
 		}
 		seenIDs[item.ID] = struct{}{}
-		if item.Type != "snell" && item.Type != "ss2022" && item.Type != "shadowtls" && item.Type != "anyconnect" {
-			return fmt.Errorf("节点 %s 类型不支持", item.Name)
+		if item.Type != "anyconnect" {
+			return errors.New("同步文件只支持 AnyConnect 节点")
 		}
-		if item.Type == "anyconnect" && item.AnyConnectSecrets == nil {
+		if item.AnyConnectSecrets == nil {
 			return fmt.Errorf("AnyConnect 节点 %s 缺少证书凭据", item.Name)
 		}
 		if len(item.Users) > 4096 {
