@@ -25,7 +25,7 @@ import (
 const (
 	maxAssetDownload         = 8 << 20
 	maxCiscoStaticIPv4Routes = 1200
-	maxChinaCIDRRoutes       = maxCiscoStaticIPv4Routes - 3
+	maxChinaCIDRRoutes       = maxCiscoStaticIPv4Routes
 	downloadAttempts         = 2
 	downloadRetryDelay       = 750 * time.Millisecond
 	chinaCIDRIANAMirror      = "https://ftp.iana.org/pub/mirror/rirstats/apnic/delegated-apnic-latest"
@@ -247,7 +247,7 @@ func ParseChinaCIDRs(input []byte, format string) ([]netip.Prefix, error) {
 		prefixes = collapsePrefixes(prefixes)
 		prefixes = largestPrefixes(prefixes, maxChinaCIDRRoutes)
 	} else if len(prefixes) > maxChinaCIDRRoutes {
-		return nil, fmt.Errorf("中国 CIDR 共 %d 条，超过为 Cisco Secure Client 预留 DNS 直连路由后的上限 %d；请改用已聚合的 CIDR/no-route 数据源", len(prefixes), maxChinaCIDRRoutes)
+		return nil, fmt.Errorf("中国 CIDR 共 %d 条，超过 Cisco Secure Client 的静态 IPv4 路由上限 %d；请改用已聚合的 CIDR/no-route 数据源", len(prefixes), maxChinaCIDRRoutes)
 	}
 	return prefixes, nil
 }

@@ -192,8 +192,8 @@ func TestRenderConfigKeepsCapabilityBoundaryAndRouteGroups(t *testing.T) {
 	if strings.Contains(text, filepath.Join(service.dataDir, "runtime", "anyconnect")) {
 		t.Fatalf("configuration still places worker sockets below the private data directory:\n%s", text)
 	}
-	group := string(renderChinaDirectGroup([]byte("no-route = 11.0.0.0/255.0.0.0\n"), "223.5.5.5,119.29.29.29"))
-	if !strings.Contains(group, "tunnel-all-dns = false") || !strings.Contains(group, "dns = 223.5.5.5") || !strings.Contains(group, "no-route = 223.5.5.5/255.255.255.255") || !strings.Contains(group, "dns = 119.29.29.29") || !strings.Contains(group, "no-route = 119.29.29.29/255.255.255.255") || !strings.Contains(group, "no-route = 11.0.0.0/255.0.0.0") {
-		t.Fatalf("ChinaDirect group does not split DNS and routes: %s", group)
+	group := string(renderChinaDirectGroup([]byte("no-route = 11.0.0.0/255.0.0.0\n")))
+	if !strings.Contains(group, "tunnel-all-dns = true") || !strings.Contains(group, "no-route = 11.0.0.0/255.0.0.0") || strings.Contains(group, "tunnel-all-dns = false") || strings.Contains(group, "\ndns = ") {
+		t.Fatalf("ChinaDirect group does not tunnel DNS and split Chinese routes: %s", group)
 	}
 }

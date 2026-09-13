@@ -48,7 +48,7 @@ func (s *Service) PrepareConfig(ctx context.Context, node nodes.Node) (string, e
 	if len(chinaRoutes) == 0 {
 		return "", errors.New("中国直连路由列表为空")
 	}
-	chinaDirect := renderChinaDirectGroup(chinaRoutes, node.Config.ChinaDirectDNS)
+	chinaDirect := renderChinaDirectGroup(chinaRoutes)
 	if err = os.WriteFile(filepath.Join(groupDir, "ChinaDirect"), chinaDirect, 0640); err != nil {
 		return "", err
 	}
@@ -289,15 +289,11 @@ func (s *Service) RuntimeDir(nodeID string) string {
 	return s.runtimeDir(nodeID)
 }
 
-func renderChinaDirectGroup(routes []byte, dnsList string) []byte {
-	result := []byte("# Resolve and route excluded destinations through the client's local network.\ntunnel-all-dns = false\n")
-	if strings.TrimSpace(dnsList) == "" {
-		dnsList = nodes.DefaultChinaDirectDNS
-	}
-	for _, dns := range strings.Split(dnsList, ",") {
-		dns = strings.TrimSpace(dns)
-		result = append(result, []byte("dns = "+dns+"\n")...)
-		result = append(result, []byte("no-route = "+dns+"/255.255.255.255\n")...)
-	}
+func renderChinaDirectGroup(routes []byte) []byte {
+	// Keep DNS inside the VPN while excluding only Chinese IPv4 destinations
+	// from the default route. The node-level dns entries in ocserv.conf are
+	// inherited by this group; the old implementation sent DNS locally, which
+	// exposed clients to resolver-specific IPv6 answers and DNS interception.
+	result := []byte("# Resolve DNS through the VPN; route excluded Chinese IPv4 destinations through the client's local network.\ntunnel-all-dns = true\n")
 	return append(result, routes...)
 }
