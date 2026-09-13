@@ -9,6 +9,23 @@ IMAGE=${PROXY_PANEL_IMAGE:-saitomikuya/proxy-panel:latest}
 case "$(uname -m)" in x86_64|aarch64|arm64) ;; *) echo "仅支持 amd64/arm64" >&2; exit 1;; esac
 command -v docker >/dev/null 2>&1 || { echo "未安装 Docker Engine，请先按 Docker 官方文档安装" >&2; exit 1; }
 docker compose version >/dev/null 2>&1 || { echo "缺少 Docker Compose 插件" >&2; exit 1; }
+if [ ! -c /dev/net/tun ]; then
+  # Minimal distributions (notably Alpine) may load the kernel support only
+  # on demand and omit the device node. Try the safe, reversible setup before
+  # letting Compose use its cgroup rule and the image entrypoint fallback.
+  command -v modprobe >/dev/null 2>&1 && modprobe tun 2>/dev/null || true
+  mkdir -p /dev/net 2>/dev/null || true
+  if [ ! -e /dev/net/tun ] && command -v mknod >/dev/null 2>&1; then
+    mknod /dev/net/tun c 10 200 2>/dev/null || true
+    chmod 0666 /dev/net/tun 2>/dev/null || true
+  fi
+fi
+if [ ! -c /dev/net/tun ]; then
+  echo "警告：宿主机未提供 /dev/net/tun；面板仍可启动，但 AnyConnect 需要启用 TUN 内核模块" >&2
+fi
+if [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || true)" != 1 ]; then
+  echo "宿主机尚未启用 IPv4 转发；面板不会自动修改它。使用 AnyConnect 前请由管理员设置 net.ipv4.ip_forward=1。" >&2
+fi
 
 install -d -m 0750 "$BASE_DIR"
 if [ ! -f "$BASE_DIR/.env" ]; then

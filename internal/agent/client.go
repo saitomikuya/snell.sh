@@ -11,6 +11,12 @@ type Client struct {
 	timeout time.Duration
 }
 
+// Applying an AnyConnect node can perform up to three guarded HTTPS asset
+// downloads on first use (certificate, private key and China CIDRs). Keep the
+// RPC deadline above those per-download limits so the first import does not
+// look like a failed operation while the agent is still preparing assets.
+const applyTimeout = 2 * time.Minute
+
 func NewClient(socket string) *Client { return &Client{socket: socket, timeout: 4 * time.Second} }
 func (c *Client) call(method string, request, response any) error {
 	return c.callWithTimeout(method, request, response, c.timeout)
@@ -36,7 +42,7 @@ func (c *Client) InstallUploadedRuntime(kind, version, format, uploadID, sha256 
 }
 func (c *Client) Apply(id string) (Result, error) {
 	var out Result
-	err := c.call("Apply", NodeRequest{NodeID: id}, &out)
+	err := c.callWithTimeout("Apply", NodeRequest{NodeID: id}, &out, applyTimeout)
 	return out, err
 }
 func (c *Client) Start(id string) (Result, error) {
@@ -87,5 +93,20 @@ func (c *Client) MaintainLogs() (LogMaintenanceResult, error) {
 func (c *Client) CleanupFirewall() (Result, error) {
 	var out Result
 	err := c.call("CleanupFirewall", Empty{}, &out)
+	return out, err
+}
+func (c *Client) RefreshAnyConnectAsset(nodeID, kind string) (AssetRefreshResult, error) {
+	var out AssetRefreshResult
+	err := c.callWithTimeout("RefreshAnyConnectAsset", AssetRefreshRequest{NodeID: nodeID, Kind: kind}, &out, 2*time.Minute)
+	return out, err
+}
+func (c *Client) SampleAnyConnectTraffic() (Result, error) {
+	var out Result
+	err := c.call("SampleAnyConnectTraffic", Empty{}, &out)
+	return out, err
+}
+func (c *Client) RemoveAnyConnect(nodeID string) (Result, error) {
+	var out Result
+	err := c.call("RemoveAnyConnect", NodeRequest{NodeID: nodeID}, &out)
 	return out, err
 }

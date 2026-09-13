@@ -50,7 +50,7 @@ func (s *Service) Create(ctx context.Context) (Entry, error) {
 	}
 	gz := gzip.NewWriter(file)
 	tw := tar.NewWriter(gz)
-	items := []struct{ source, name string }{{dbSnapshot, "db/panel.db"}, {filepath.Join(s.dataDir, "secrets", "master.key"), "secrets/master.key"}, {filepath.Join(s.dataDir, "config"), "config"}, {filepath.Join(s.dataDir, "upstream", "manifests"), "upstream/manifests"}}
+	items := []struct{ source, name string }{{dbSnapshot, "db/panel.db"}, {filepath.Join(s.dataDir, "secrets", "master.key"), "secrets/master.key"}, {filepath.Join(s.dataDir, "config"), "config"}, {filepath.Join(s.dataDir, "anyconnect"), "anyconnect"}, {filepath.Join(s.dataDir, "upstream", "manifests"), "upstream/manifests"}}
 	for _, item := range items {
 		if err = addPath(tw, item.source, item.name); err != nil {
 			tw.Close()
@@ -181,8 +181,13 @@ func (s *Service) Restore(ctx context.Context, id string) (Entry, error) {
 	if err = os.MkdirAll(filepath.Join(staging, "config"), 0750); err != nil {
 		return preBackup, err
 	}
+	if err = os.MkdirAll(filepath.Join(staging, "anyconnect"), 0750); err != nil {
+		return preBackup, err
+	}
 	oldConfig := filepath.Join(s.dataDir, "runtime", "config-before-restore")
+	oldAnyConnect := filepath.Join(s.dataDir, "runtime", "anyconnect-before-restore")
 	_ = os.RemoveAll(oldConfig)
+	_ = os.RemoveAll(oldAnyConnect)
 	if err = os.Rename(filepath.Join(s.dataDir, "config"), oldConfig); err != nil {
 		return preBackup, err
 	}
@@ -190,12 +195,26 @@ func (s *Service) Restore(ctx context.Context, id string) (Entry, error) {
 		_ = os.Rename(oldConfig, filepath.Join(s.dataDir, "config"))
 		return preBackup, err
 	}
-	if err = restoreDatabase(ctx, s.db, snapshot); err != nil {
+	if err = os.Rename(filepath.Join(s.dataDir, "anyconnect"), oldAnyConnect); err != nil && !os.IsNotExist(err) {
 		_ = os.RemoveAll(filepath.Join(s.dataDir, "config"))
 		_ = os.Rename(oldConfig, filepath.Join(s.dataDir, "config"))
 		return preBackup, err
 	}
+	if err = os.Rename(filepath.Join(staging, "anyconnect"), filepath.Join(s.dataDir, "anyconnect")); err != nil {
+		_ = os.RemoveAll(filepath.Join(s.dataDir, "config"))
+		_ = os.Rename(oldConfig, filepath.Join(s.dataDir, "config"))
+		_ = os.Rename(oldAnyConnect, filepath.Join(s.dataDir, "anyconnect"))
+		return preBackup, err
+	}
+	if err = restoreDatabase(ctx, s.db, snapshot); err != nil {
+		_ = os.RemoveAll(filepath.Join(s.dataDir, "config"))
+		_ = os.Rename(oldConfig, filepath.Join(s.dataDir, "config"))
+		_ = os.RemoveAll(filepath.Join(s.dataDir, "anyconnect"))
+		_ = os.Rename(oldAnyConnect, filepath.Join(s.dataDir, "anyconnect"))
+		return preBackup, err
+	}
 	_ = os.RemoveAll(oldConfig)
+	_ = os.RemoveAll(oldAnyConnect)
 	return preBackup, nil
 }
 func restoreDatabase(ctx context.Context, db *sql.DB, snapshot string) error {
@@ -208,18 +227,25 @@ func restoreDatabase(ctx context.Context, db *sql.DB, snapshot string) error {
 		return err
 	}
 	defer db.ExecContext(context.Background(), `PRAGMA foreign_keys=ON`)
-	tables := []string{"sessions", "traffic_samples", "node_configs", "config_revisions", "runtime_instances", "traffic_counters", "jobs", "audit_logs", "nodes", "secrets", "auth_state"}
+	tables := []string{"sessions", "traffic_samples", "node_configs", "config_revisions", "runtime_instances", "traffic_counters", "jobs", "audit_logs"}
 	inserts := []string{`INSERT INTO auth_state SELECT * FROM restored.auth_state`, `INSERT INTO secrets SELECT * FROM restored.secrets`, `INSERT INTO nodes SELECT * FROM restored.nodes ORDER BY backend_node_id IS NOT NULL`, `INSERT INTO node_configs SELECT * FROM restored.node_configs`, `INSERT INTO config_revisions SELECT * FROM restored.config_revisions`, `INSERT INTO runtime_instances SELECT * FROM restored.runtime_instances`, `INSERT INTO traffic_counters SELECT * FROM restored.traffic_counters`, `INSERT INTO jobs SELECT * FROM restored.jobs`, `INSERT INTO audit_logs SELECT * FROM restored.audit_logs`}
-	for _, optional := range []string{"project_traffic", "system_settings", "app_meta"} {
-		var found int
-		if err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM restored.sqlite_master WHERE type='table' AND name=?`, optional).Scan(&found); err != nil {
+	for _, optional := range []string{"project_traffic", "system_settings", "app_meta", "anyconnect_users", "anyconnect_asset_state", "anyconnect_user_traffic", "anyconnect_user_samples"} {
+		var targetFound, restoredFound int
+		if err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM main.sqlite_master WHERE type='table' AND name=?`, optional).Scan(&targetFound); err != nil {
 			return err
 		}
-		if found > 0 {
-			tables = append(tables, optional)
+		if targetFound == 0 {
+			continue
+		}
+		tables = append(tables, optional)
+		if err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM restored.sqlite_master WHERE type='table' AND name=?`, optional).Scan(&restoredFound); err != nil {
+			return err
+		}
+		if restoredFound > 0 {
 			inserts = append(inserts, `INSERT INTO `+optional+` SELECT * FROM restored.`+optional)
 		}
 	}
+	tables = append(tables, "nodes", "secrets", "auth_state")
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err

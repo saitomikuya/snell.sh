@@ -100,3 +100,85 @@ func TestProjectQuotaUsesIndependentPeriodAndPause(t *testing.T) {
 		t.Fatalf("project reset failed: %+v, %v", counter, err)
 	}
 }
+
+func TestAnyConnectUserQuotaIsIndependent(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(dir+"/db", 0755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := database.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if _, err = db.DB.Exec(`INSERT INTO nodes(id,type,name,enabled,desired_state,runtime_version,listen_host,listen_port,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, "node-a", "anyconnect", "AnyConnect", 1, "stopped", "v1.5.0", "127.0.0.1", 443, database.Now(), database.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.DB.Exec(`INSERT INTO secrets(id,kind,ciphertext,nonce,created_at,updated_at) VALUES(?,?,?,?,?,?)`, "secret-a", "test", []byte("x"), []byte("n"), database.Now(), database.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.DB.Exec(`INSERT INTO anyconnect_users(id,node_id,username,password_secret_ref,route_group,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`, "user-a", "node-a", "alice", "secret-a", "full", 1, database.Now(), database.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.DB.Exec(`INSERT INTO anyconnect_user_traffic(user_id,period,reset_day,updated_at) VALUES(?,?,?,?)`, "user-a", "2026-08-05", 5, database.Now()); err != nil {
+		t.Fatal(err)
+	}
+	store := New(db.DB)
+	if err = store.SetUserQuota(ctx, "user-a", 2*1024*1024*1024, 5); err != nil {
+		t.Fatal(err)
+	}
+	counter, err := store.GetUser(ctx, "user-a")
+	if err != nil || counter.QuotaBytes != 2*1024*1024*1024 || counter.ResetDay != 5 {
+		t.Fatalf("unexpected user quota: %+v, %v", counter, err)
+	}
+	if err = store.ResetUser(ctx, "user-a"); err != nil {
+		t.Fatal(err)
+	}
+	counter, err = store.GetUser(ctx, "user-a")
+	if err != nil || counter.UploadBytes != 0 || counter.DownloadBytes != 0 || counter.QuotaBytes != 2*1024*1024*1024 {
+		t.Fatalf("unexpected user reset: %+v, %v", counter, err)
+	}
+}
+
+func TestSampleUserPersistsDeltaAndAppliesQuota(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(dir+"/db", 0755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := database.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if _, err = db.DB.Exec(`INSERT INTO nodes(id,type,name,enabled,desired_state,runtime_version,listen_host,listen_port,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, "node-a", "anyconnect", "AnyConnect", 1, "running", "v1.5.0", "127.0.0.1", 443, database.Now(), database.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.DB.Exec(`INSERT INTO secrets(id,kind,ciphertext,nonce,created_at,updated_at) VALUES(?,?,?,?,?,?)`, "secret-a", "test", []byte("x"), []byte("n"), database.Now(), database.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.DB.Exec(`INSERT INTO anyconnect_users(id,node_id,username,password_secret_ref,route_group,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`, "user-a", "node-a", "alice", "secret-a", "full", 1, database.Now(), database.Now()); err != nil {
+		t.Fatal(err)
+	}
+	store := New(db.DB)
+	if err = store.SetUserQuota(ctx, "user-a", 1000, 1); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
+	first, err := store.SampleUser(ctx, "user-a", 100, 200, now)
+	if err != nil || first.DeltaUpload != 0 || first.DeltaDownload != 0 {
+		t.Fatalf("first user sample should establish a baseline: %+v, %v", first, err)
+	}
+	second, err := store.SampleUser(ctx, "user-a", 400, 900, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.DeltaUpload != 300 || second.DeltaDownload != 700 || second.Firewall != "pause" || !second.Paused {
+		t.Fatalf("unexpected user sample: %+v", second)
+	}
+	counter, err := store.GetUser(ctx, "user-a")
+	if err != nil || counter.UploadBytes != 300 || counter.DownloadBytes != 700 || !counter.PausedByQuota {
+		t.Fatalf("unexpected persisted user counter: %+v, %v", counter, err)
+	}
+}

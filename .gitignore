@@ -1,6 +1,11 @@
 /bin/
 /dist/
 /web/node_modules/
+.pnpm-store/
+/project/
+/tmp-route-check/
+internal/api/ui/assets/* 2.*
+internal/api/ui/index 2.html
 *.db
 *.db-shm
 *.db-wal

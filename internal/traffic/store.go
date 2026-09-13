@@ -33,6 +33,21 @@ type ProjectCounter struct {
 	UpdatedAt     string `json:"updatedAt"`
 }
 
+// UserCounter tracks an AnyConnect account independently from its node. The
+// agent samples ocserv's per-session counters and rolls their deltas into this
+// durable monthly record.
+type UserCounter struct {
+	UserID        string `json:"userId"`
+	Period        string `json:"period"`
+	UploadBytes   int64  `json:"uploadBytes"`
+	DownloadBytes int64  `json:"downloadBytes"`
+	QuotaBytes    int64  `json:"quotaBytes"`
+	ResetDay      int    `json:"resetDay"`
+	Paused        bool   `json:"paused"`
+	PausedByQuota bool   `json:"pausedByQuota"`
+	UpdatedAt     string `json:"updatedAt"`
+}
+
 type SampleResult struct {
 	NodeID        string
 	DeltaUpload   int64
@@ -48,6 +63,17 @@ type ProjectSampleResult struct {
 	DeltaDownload int64
 	TotalUpload   int64
 	TotalDownload int64
+	Firewall      string // "pause", "resume", or empty
+	Paused        bool
+}
+
+type UserSampleResult struct {
+	UserID        string
+	DeltaUpload   int64
+	DeltaDownload int64
+	TotalUpload   int64
+	TotalDownload int64
+	QuotaBytes    int64
 	Firewall      string // "pause", "resume", or empty
 	Paused        bool
 }
@@ -85,6 +111,59 @@ func (s *Store) Project(ctx context.Context) (ProjectCounter, error) {
 	err := s.db.QueryRowContext(ctx, `SELECT period,upload_bytes,download_bytes,quota_bytes,reset_day,paused,paused_by_quota,updated_at FROM project_traffic WHERE id=1`).
 		Scan(&counter.Period, &counter.UploadBytes, &counter.DownloadBytes, &counter.QuotaBytes, &counter.ResetDay, &counter.Paused, &counter.PausedByQuota, &counter.UpdatedAt)
 	return counter, err
+}
+
+func (s *Store) GetUser(ctx context.Context, userID string) (UserCounter, error) {
+	var counter UserCounter
+	err := s.db.QueryRowContext(ctx, `SELECT user_id,period,upload_bytes,download_bytes,quota_bytes,reset_day,paused,paused_by_quota,updated_at FROM anyconnect_user_traffic WHERE user_id=?`, userID).
+		Scan(&counter.UserID, &counter.Period, &counter.UploadBytes, &counter.DownloadBytes, &counter.QuotaBytes, &counter.ResetDay, &counter.Paused, &counter.PausedByQuota, &counter.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		now := database.Now()
+		counter = UserCounter{UserID: userID, Period: BillingPeriod(time.Now().UTC(), 1), ResetDay: 1, UpdatedAt: now}
+		_, err = s.db.ExecContext(ctx, `INSERT OR IGNORE INTO anyconnect_user_traffic(user_id,period,reset_day,updated_at) VALUES(?,?,?,?)`, userID, counter.Period, counter.ResetDay, now)
+		if err != nil {
+			return UserCounter{}, err
+		}
+		return s.GetUser(ctx, userID)
+	}
+	return counter, err
+}
+
+func (s *Store) SetUserQuota(ctx context.Context, userID string, quota int64, resetDay int) error {
+	if quota < 0 || resetDay < 1 || resetDay > 28 {
+		return errors.New("invalid user quota or reset day")
+	}
+	if _, err := s.GetUser(ctx, userID); err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE anyconnect_user_traffic SET quota_bytes=?,reset_day=?,paused=CASE WHEN ?=0 OR upload_bytes+download_bytes<? THEN 0 ELSE 1 END,paused_by_quota=CASE WHEN ?=0 OR upload_bytes+download_bytes<? THEN 0 ELSE 1 END,updated_at=? WHERE user_id=?`, quota, resetDay, quota, quota, quota, quota, database.Now(), userID)
+	if err != nil {
+		return err
+	}
+	return requireRow(result)
+}
+
+func (s *Store) ResetUser(ctx context.Context, userID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var resetDay int
+	if err = tx.QueryRowContext(ctx, `SELECT reset_day FROM anyconnect_user_traffic WHERE user_id=?`, userID).Scan(&resetDay); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE anyconnect_user_traffic SET period=?,upload_bytes=0,download_bytes=0,paused=0,paused_by_quota=0,updated_at=? WHERE user_id=?`, BillingPeriod(time.Now().UTC(), resetDay), database.Now(), userID)
+	if err != nil {
+		return err
+	}
+	if err = requireRow(result); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM anyconnect_user_samples WHERE user_id=?`, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) SetQuota(ctx context.Context, id string, quota int64, resetDay int) error {
@@ -286,6 +365,79 @@ func (s *Store) Sample(ctx context.Context, id string, rawUpload, rawDownload in
 	}
 	result.TotalUpload = counter.UploadBytes
 	result.TotalDownload = counter.DownloadBytes
+	result.Paused = counter.Paused
+	return result, nil
+}
+
+// SampleUser persists deltas from occtl's cumulative per-session counters.
+// A counter drop indicates that ocserv replaced or removed a session; the
+// next sample establishes a new baseline without double-counting bytes.
+func (s *Store) SampleUser(ctx context.Context, userID string, rawUpload, rawDownload int64, now time.Time) (UserSampleResult, error) {
+	if rawUpload < 0 || rawDownload < 0 {
+		return UserSampleResult{}, errors.New("raw user traffic counters cannot be negative")
+	}
+	if _, err := s.GetUser(ctx, userID); err != nil {
+		return UserSampleResult{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return UserSampleResult{}, err
+	}
+	defer tx.Rollback()
+	var counter UserCounter
+	var previousUpload, previousDownload sql.NullInt64
+	err = tx.QueryRowContext(ctx, `SELECT c.user_id,c.period,c.upload_bytes,c.download_bytes,c.quota_bytes,c.reset_day,c.paused,c.paused_by_quota,c.updated_at,s.upload_bytes,s.download_bytes
+		FROM anyconnect_user_traffic c LEFT JOIN anyconnect_user_samples s ON s.user_id=c.user_id WHERE c.user_id=?`, userID).
+		Scan(&counter.UserID, &counter.Period, &counter.UploadBytes, &counter.DownloadBytes, &counter.QuotaBytes, &counter.ResetDay, &counter.Paused, &counter.PausedByQuota, &counter.UpdatedAt, &previousUpload, &previousDownload)
+	if err != nil {
+		return UserSampleResult{}, err
+	}
+	result := UserSampleResult{UserID: userID}
+	period := BillingPeriod(now, counter.ResetDay)
+	if counter.Period != period {
+		counter.Period = period
+		counter.UploadBytes = 0
+		counter.DownloadBytes = 0
+		previousUpload.Valid = false
+		previousDownload.Valid = false
+		if counter.PausedByQuota {
+			counter.Paused = false
+			counter.PausedByQuota = false
+			result.Firewall = "resume"
+		}
+	}
+	if previousUpload.Valid && previousDownload.Valid {
+		if rawUpload >= previousUpload.Int64 {
+			result.DeltaUpload = rawUpload - previousUpload.Int64
+		}
+		if rawDownload >= previousDownload.Int64 {
+			result.DeltaDownload = rawDownload - previousDownload.Int64
+		}
+		counter.UploadBytes += result.DeltaUpload
+		counter.DownloadBytes += result.DeltaDownload
+	}
+	if counter.PausedByQuota && (counter.QuotaBytes == 0 || counter.UploadBytes+counter.DownloadBytes < counter.QuotaBytes) {
+		counter.Paused = false
+		counter.PausedByQuota = false
+		result.Firewall = "resume"
+	} else if counter.QuotaBytes > 0 && counter.UploadBytes+counter.DownloadBytes >= counter.QuotaBytes && !counter.Paused {
+		counter.Paused = true
+		counter.PausedByQuota = true
+		result.Firewall = "pause"
+	}
+	nowText := now.UTC().Format(time.RFC3339Nano)
+	if _, err = tx.ExecContext(ctx, `INSERT INTO anyconnect_user_samples(user_id,upload_bytes,download_bytes,updated_at) VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET upload_bytes=excluded.upload_bytes,download_bytes=excluded.download_bytes,updated_at=excluded.updated_at`, userID, rawUpload, rawDownload, nowText); err != nil {
+		return UserSampleResult{}, err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE anyconnect_user_traffic SET period=?,upload_bytes=?,download_bytes=?,paused=?,paused_by_quota=?,updated_at=? WHERE user_id=?`, counter.Period, counter.UploadBytes, counter.DownloadBytes, counter.Paused, counter.PausedByQuota, nowText, userID); err != nil {
+		return UserSampleResult{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return UserSampleResult{}, err
+	}
+	result.TotalUpload = counter.UploadBytes
+	result.TotalDownload = counter.DownloadBytes
+	result.QuotaBytes = counter.QuotaBytes
 	result.Paused = counter.Paused
 	return result, nil
 }

@@ -98,7 +98,10 @@ func runServer() error {
 	defer stopMaintenance()
 	go maintain(maintenanceContext, store)
 	handler := api.New(store, authService, nodeStore, agent.NewClient(cfg.AgentSocket), cfg.SecureCookie, version).Handler()
-	server := &http.Server{Addr: cfg.Address(), Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+	// First-time AnyConnect imports may synchronously download and validate a
+	// certificate, private key and China CIDR list before applying the node.
+	// Keep the response open long enough for the agent's two-minute apply RPC.
+	server := &http.Server{Addr: cfg.Address(), Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 2 * time.Minute, IdleTimeout: 60 * time.Second}
 	errChannel := make(chan error, 1)
 	go func() {
 		log.Printf("Proxy Panel %s listening on http://%s", version, cfg.Address())

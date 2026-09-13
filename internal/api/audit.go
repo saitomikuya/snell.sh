@@ -7,34 +7,42 @@ import (
 )
 
 var auditActionLabels = map[string]string{
-	"auth.login":                   "登录管理控制台",
-	"auth.logout":                  "退出管理控制台",
-	"auth.password_changed":        "修改管理员密码",
-	"auth.password_reset":          "将管理员密码重置为默认值",
-	"node.create":                  "创建节点并应用配置",
-	"node.update":                  "更新节点配置",
-	"node.delete":                  "删除节点",
-	"node.apply":                   "重新应用节点配置",
-	"node.start":                   "启动节点",
-	"node.stop":                    "停止节点",
-	"node.restart":                 "重启节点",
-	"node.logs.view":               "查看节点运行日志",
-	"node.client_config.view":      "查看完整客户端配置和二维码",
-	"traffic.quota.update":         "修改节点流量限额",
-	"traffic.pause":                "暂停节点网络访问",
-	"traffic.resume":               "恢复节点网络访问",
-	"traffic.reset":                "重置节点流量统计",
-	"traffic.project.quota.update": "修改项目总流量限额",
-	"traffic.project.pause":        "暂停项目全部公网节点",
-	"traffic.project.resume":       "恢复项目公网节点",
-	"traffic.project.reset":        "重置项目总流量统计",
-	"settings.logs.update":         "修改节点日志设置",
-	"backup.create":                "创建一致性备份",
-	"backup.delete":                "删除备份",
-	"backup.restore":               "恢复备份",
-	"update.check":                 "检查上游版本",
-	"update.apply":                 "一键更新运行时",
-	"update.upload":                "上传并适配运行时",
+	"auth.login":                           "登录管理控制台",
+	"auth.logout":                          "退出管理控制台",
+	"auth.password_changed":                "修改管理员密码",
+	"auth.password_reset":                  "将管理员密码重置为默认值",
+	"node.create":                          "创建节点并应用配置",
+	"node.update":                          "更新节点配置",
+	"node.delete":                          "删除节点",
+	"node.apply":                           "重新应用节点配置",
+	"node.start":                           "启动节点",
+	"node.stop":                            "停止节点",
+	"node.restart":                         "重启节点",
+	"node.logs.view":                       "查看节点运行日志",
+	"node.client_config.view":              "查看完整客户端配置和二维码",
+	"anyconnect.user.create":               "创建 AnyConnect 用户",
+	"anyconnect.user.update":               "更新 AnyConnect 用户与路由组",
+	"anyconnect.user.delete":               "删除 AnyConnect 用户",
+	"anyconnect.user.traffic.quota.update": "修改 AnyConnect 用户流量限额",
+	"anyconnect.user.traffic.reset":        "重置 AnyConnect 用户流量",
+	"anyconnect.asset.refresh":             "刷新 AnyConnect 证书或路由数据",
+	"traffic.quota.update":                 "修改节点流量限额",
+	"traffic.pause":                        "暂停节点网络访问",
+	"traffic.resume":                       "恢复节点网络访问",
+	"traffic.reset":                        "重置节点流量统计",
+	"traffic.project.quota.update":         "修改项目总流量限额",
+	"traffic.project.pause":                "暂停项目全部公网节点",
+	"traffic.project.resume":               "恢复项目公网节点",
+	"traffic.project.reset":                "重置项目总流量统计",
+	"settings.logs.update":                 "修改节点日志设置",
+	"backup.create":                        "创建一致性备份",
+	"backup.delete":                        "删除备份",
+	"backup.restore":                       "恢复备份",
+	"update.check":                         "检查上游版本",
+	"update.apply":                         "一键更新运行时",
+	"update.upload":                        "上传并适配运行时",
+	"sync.export":                          "导出 AnyConnect 节点与用户配置",
+	"sync.import":                          "导入 AnyConnect 节点与用户配置",
 }
 
 var auditTargetLabels = map[string]string{
@@ -44,6 +52,7 @@ var auditTargetLabels = map[string]string{
 	"update":   "更新组件",
 	"project":  "整个项目",
 	"settings": "系统设置",
+	"sync":     "AnyConnect 跨服务器同步",
 }
 
 func auditJSON(values map[string]any) string {
@@ -117,6 +126,15 @@ func describeAudit(action, targetType, raw string) (string, string, string) {
 	if value, ok := details["nodesUpdated"].(float64); ok {
 		parts = append(parts, fmt.Sprintf("更新节点：%.0f 个", value))
 	}
+	if value, ok := details["username"].(string); ok && value != "" {
+		parts = append(parts, "用户："+value)
+	}
+	if value, ok := details["routeGroup"].(string); ok && value != "" {
+		parts = append(parts, "路由组："+map[string]string{"full": "全隧道", "cn": "中国直连", "select": "登录时选择"}[value])
+	}
+	if value, ok := details["kind"].(string); ok && value != "" {
+		parts = append(parts, "资源："+map[string]string{"certificate": "服务器证书", "cidr": "中国 CIDR"}[value])
+	}
 	if value, ok := details["rolledBack"].(bool); ok && value {
 		parts = append(parts, "应用失败并已自动回滚")
 	}
@@ -131,6 +149,8 @@ func protocolName(value string) string {
 		return "Shadowsocks 2022"
 	case "shadowtls":
 		return "ShadowTLS"
+	case "anyconnect":
+		return "AnyConnect"
 	default:
 		return value
 	}

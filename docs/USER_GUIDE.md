@@ -3,7 +3,7 @@
 本文面向准备把 Proxy Panel 部署到 Debian/Ubuntu VPS 的使用者，覆盖安装、访问、节点管理、客户端导入、流量管理、更新备份、日常维护和排障。
 
 > [!IMPORTANT]
-> Proxy Panel 是基于 [`jinqians/snell.sh`](https://github.com/jinqians/snell.sh) 和 [`jinqians/ss-2022.sh`](https://github.com/jinqians/ss-2022.sh) 的功能与配置语义开发的可视化二次项目，不是上游官方版本。遇到面板自身问题请在本仓库反馈，不要让上游作者承担本项目的支持责任。
+> Proxy Panel 是基于 [`jinqians/snell.sh`](https://github.com/jinqians/snell.sh)、[`jinqians/ss-2022.sh`](https://github.com/jinqians/ss-2022.sh) 和 [`MoeClub/ocserv_docker`](https://github.com/MoeClub/ocserv_docker) 的功能与配置语义开发的可视化二次项目，不是上游官方版本。遇到面板自身问题请在本仓库反馈，不要让上游作者承担本项目的支持责任。
 
 ## 1. 当前可用范围
 
@@ -12,6 +12,8 @@
 - Snell v5 节点；
 - Shadowsocks Rust / SS-2022 节点；
 - 以 Snell 或 SS-2022 为后端的 ShadowTLS v3 前端；
+- 基于 ocserv 1.5.0、兼容 Cisco Secure Client/OpenConnect 的多 AnyConnect 节点；
+- AnyConnect 用户名/密码、按用户全隧道/中国直连路由组，以及证书和中国 CIDR 定时更新；
 - 节点启停、重启、日志和客户端配置；
 - 公网端口流量统计、月限额、暂停和恢复；
 - 上游版本检查、受控运行时更新、配置备份和恢复；
@@ -22,7 +24,6 @@
 
 - 自动下载并经过固定 SHA256 校验的 Snell 运行时只有 v5.0.1。界面虽然保留 v4/v6 配置项，但在补齐对应版本的固定运行时目录和校验清单前，不应切换为 v4/v6；
 - simple-obfs 的配置结构已经预留，但二进制自动安装尚未完成；
-- 中国大陆 CIDR 数据集的自动下载和切换尚未完成；
 - 面板没有替你修改云厂商安全组；
 - ShadowTLS 主要承载 TCP。SS-2022 的 UDP 仍连接原始 SS 端口；
 - 正式支持 Linux VPS，不支持把 Docker Desktop 当作生产环境。
@@ -40,7 +41,7 @@
 | 容器 | Docker Engine，带 `docker compose` 插件 |
 | 权限 | 安装时可使用 root / sudo |
 | 网络 | 能通过 HTTPS 访问 GitHub、`dl.nssurge.com` 和对应 Release 下载地址 |
-| 内核 | 支持 nftables；容器需要 `NET_ADMIN`、`NET_RAW` |
+| 内核 | 支持 nftables；AnyConnect 还需 `/dev/net/tun`、已启用 IPv4 转发；容器需要 `NET_ADMIN`、`NET_RAW` |
 
 检查命令：
 
@@ -49,6 +50,8 @@ uname -m
 docker version
 docker compose version
 sudo nft --version
+test -c /dev/net/tun && echo TUN_OK
+sysctl net.ipv4.ip_forward
 ```
 
 ### 2.2 规划端口
@@ -61,6 +64,7 @@ sudo nft --version
 | Snell ShadowTLS | `0.0.0.0:8443/tcp` | 是 |
 | SS-2022 主节点 | `0.0.0.0` 上的可用端口，TCP+UDP | 是，UDP 需直连原始端口 |
 | SS-2022 ShadowTLS | 首次启动时选择另一个可用 TCP 端口 | 是 |
+| AnyConnect | 用户配置，默认 `443/tcp+udp` | 是 |
 
 实际随机端口以面板显示为准。云安全组和宿主机防火墙至少要放行你准备使用的公网节点端口：
 
@@ -82,8 +86,19 @@ sudo ufw allow 20000/udp
 镜像 `saitomikuya/proxy-panel:latest` 同时发布 `linux/amd64` 和 `linux/arm64`。已经安装 Docker 的 VPS 直接执行：
 
 ```bash
-sudo docker run -d --name proxy-panel --pull=always --restart unless-stopped --network host --cap-add NET_ADMIN --cap-add NET_RAW -v /opt/proxy-panel:/data -e PANEL_BIND=0.0.0.0 -e PANEL_PORT=8080 -e TZ=Asia/Shanghai saitomikuya/proxy-panel:latest
+sudo docker run -d --name proxy-panel --pull=always --restart unless-stopped --network host --device /dev/net/tun:/dev/net/tun --cap-add NET_ADMIN --cap-add NET_RAW -v /opt/proxy-panel:/data -e PANEL_BIND=0.0.0.0 -e PANEL_PORT=8080 -e TZ=Asia/Shanghai saitomikuya/proxy-panel:latest
 ```
+
+如果宿主机没有 `/dev/net/tun`，Docker 会在容器启动前失败。Alpine 宿主机先执行 `apk add --no-cache kmod`，然后加载并创建设备：
+
+```sh
+modprobe tun
+mkdir -p /dev/net
+test -c /dev/net/tun || mknod /dev/net/tun c 10 200
+chmod 0666 /dev/net/tun
+```
+
+建议把 `tun` 写入 `/etc/modules` 并执行 `rc-update add modules boot`。如果不能提前创建设备，可删除 `--device /dev/net/tun:/dev/net/tun`，增加 `--device-cgroup-rule='c 10:200 rwm'`；镜像会自动尝试创建 TUN 节点。宿主机内核未启用 TUN 或使用 rootless Docker 时仍需改用支持 TUN 的运行环境。
 
 Docker 会自动拉取匹配当前 CPU 架构的镜像，持久化数据保存在 `/opt/proxy-panel`。容器健康后直接打开 `http://你的服务器IP:8080`。
 
@@ -128,6 +143,7 @@ sudo ./scripts/install.sh
 安装器会：
 
 - 检查 Linux、CPU 架构、Docker Engine 和 Compose 插件；
+- 检查 TUN 和 IPv4 转发状态；安装器和 Compose 使用 TUN 设备 cgroup 规则，入口会在缺失时尝试创建 `/dev/net/tun`，并给出明确提示；
 - 创建 `/opt/proxy-panel`；
 - 写入 `/opt/proxy-panel/compose.yaml` 和 `.env`；
 - 拉取镜像并等待健康检查；
@@ -275,7 +291,22 @@ UDP：客户端 ──SS-2022 原始 UDP 端口───────────
 
 不能在还有 ShadowTLS 依赖时删除后端节点。应先删除或改绑 ShadowTLS，再删除后端。
 
-### 6.5 节点操作按钮
+### 6.5 创建和管理 AnyConnect 节点
+
+1. 选择 `AnyConnect` 标签页并新建节点，填写证书所覆盖的连接域名和监听端口；
+2. 地址池默认 `192.168.144.0/24`，多个节点不能重叠；全隧道 DNS、中国直连 DNS、MTU、最大客户端数、单用户连接数和 UDP/DTLS 均可独立配置；
+3. 填写完整证书链与加密私钥的 HTTPS 下载地址、下载密码；仅密码的分发中心可将 Basic 用户名留空；
+4. 分别为证书和中国 CIDR 选择手动、每天或每周更新时间，时间按容器 `TZ` 解释；
+5. 保存后进入“用户与资源”创建用户名/密码，并为每个用户选择“全隧道”“中国直连”或“登录时选择”；
+6. 需要时可在同一弹窗立即刷新证书或 CIDR，并查看最近成功时间、指纹、条目数和脱敏错误。
+
+在 AnyConnect 标签页节点列表下方，面板会汇总所有 AnyConnect 节点的已开通用户、当前周期上下行流量和限额状态。点击“设限额”可单独设置月流量与每月重置日（填 `0` 表示不限额），也可只清零某个用户；Agent 通过 occtl 采样账号流量，达到限额后终止该账号当前会话，不影响同节点其他用户。跨服务器同步区域已压缩为一行操作，导出的 JSON 会包含各节点用户的月流量限额和重置日，导入时恢复限额但保留目标服务器的历史使用量；导入前仍会自动备份。
+
+勾选“下发可选服务器列表”可生成 `profile.xml`：每行填写 `显示名称 | 域名:端口`，第一行就是客户端首次默认节点。建议所有节点手动填写相同列表并把固定主节点放在第一行；当前节点不在列表中时会自动追加到末尾。用户首次成功连接后，Cisco Secure Client 会自动下载并保存该文件；它不会改变用户路由组。若手机提示无法下载配置文件，请重新保存并应用节点，再查看节点日志中的 `cannot load config file` 或 `error sending file`。
+
+证书更新只有在链顺序、有效期、连接域名和私钥全部匹配时才会原子切换。CIDR 默认读取 APNIC 中国 IPv4 数据，无损合并后为 Cisco 客户端选取覆盖面最大的 1197 条，再为中国直连 DNS 添加最多 3 条主机路由；默认 APNIC 地址超时或暂时不可达时，会自动重试并切换 IANA、RIPE 的 APNIC 官方镜像。也支持自定义 CIDR 或 ocserv `no-route` 数据源。更新异常会继续使用上一版本。完整前置条件与安全边界见 [AnyConnect 使用说明](./ANYCONNECT.md)。
+
+### 6.6 节点操作按钮
 
 | 操作 | 效果 |
 |---|---|
@@ -294,6 +325,9 @@ UDP：客户端 ──SS-2022 原始 UDP 端口───────────
 - SS-2022：SIP002 链接、Shadowrocket 二维码、Surge 和 Clash/Mihomo 配置；
 - ShadowTLS + Snell：Surge 和 Clash/Mihomo 组合配置；
 - ShadowTLS + SS-2022：Shadowrocket 组合链接/二维码、Surge 和 Clash/Mihomo 配置。
+- AnyConnect：Cisco Secure Client 服务器地址，以及 OpenConnect 命令示例；密码不会显示在客户端配置中。
+
+AnyConnect 配置弹窗还提供 `anyconnect-profile.xml` 下载按钮。下载后可在 Cisco Secure Client 的“配置文件 → 导入配置文件”中手动导入；第一行节点是首次默认连接目标。若监听端口不是 443，请在节点列表、客户端地址、防火墙和云安全组中使用并放行对应的 TCP/UDP 端口。
 
 使用注意：
 
@@ -359,6 +393,7 @@ UDP：客户端 ──SS-2022 原始 UDP 端口───────────
 - `/data/secrets/master.key`；
 - 节点生成配置；
 - 上游元数据。
+- AnyConnect 用户、资源状态、当前证书/私钥和中国 CIDR 资源。
 
 备份文件位于 `/opt/proxy-panel/backups`。建议另外复制到受保护的异地存储，因为删除 VPS 会同时丢失本机备份。
 
@@ -372,6 +407,12 @@ sudo tar -czf proxy-panel-data.tar.gz proxy-panel
 ```
 
 请像保护密码一样保护该归档，它包含解密节点密钥所需的主密钥。
+
+### 9.5 AnyConnect 节点跨服务器同步
+
+进入“节点管理 → AnyConnect”，在节点列表下方的“AnyConnect 跨服务器同步”区域点击“导出 AnyConnect 节点及用户”。导出的普通 JSON 只包含 AnyConnect 节点配置、证书下载凭据和该节点的用户名/密码及路由组，不包含 Snell、SS-2022 或 ShadowTLS 节点。
+
+在另一台面板的同一页面选择该 JSON 并点击“导入并合并”即可同步。导入前会自动创建本机备份；同 ID 优先匹配，其次按“AnyConnect + 名称”匹配，缺少的 AnyConnect 节点会创建，默认不会删除节点。用户按用户名更新或创建；勾选“删除目标 AnyConnect 中未出现在文件里的用户”才会执行用户删除。导入不会处理其他协议节点，也不会自动修改 `profile.xml` 文本。文件不带口令保护，传输完成后应立即删除或放入受保护的存储。若导入应用失败，请使用界面中提示的导入前备份恢复。
 
 ## 10. 日志、审计和安全设置
 
@@ -448,6 +489,7 @@ sudo ./scripts/uninstall.sh --purge
 ├── db/panel.db                 # SQLite 数据库
 ├── secrets/master.key          # 解密节点秘密的主密钥
 ├── config/                     # 当前生成配置及最后可用快照
+├── anyconnect/                 # 已校验证书、私钥和中国 CIDR 资源
 ├── runtime/                    # 已校验运行时和 Agent Socket
 ├── logs/                       # 节点滚动日志
 ├── backups/                    # 面板创建的备份
@@ -495,6 +537,15 @@ curl -v http://127.0.0.1:8080/healthz
 - 核对导入的是 ShadowTLS 公网端口还是后端端口；
 - SS-2022 + ShadowTLS 使用 UDP 时，还要放行并填写原始 SS UDP 端口；
 - 重新打开“配置”，避免使用已经修改过的旧密钥。
+
+AnyConnect 还需检查：
+
+- 容器允许使用 `c 10:200` TUN 设备，且宿主机 `net.ipv4.ip_forward=1`；
+- TCP 端口已放行；启用 UDP/DTLS 时同号 UDP 端口也已放行；
+- Cisco 客户端使用的服务器域名与面板连接域名及证书 SAN 一致；
+- 执行 `sudo nft list table inet proxy_panel` 能看到对应地址池的转发和 masquerade 规则；
+- 执行 `sudo iptables -S PROXY-PANEL-VPN` 能看到同时限定节点 TUN 接口和 VPN 地址池的转发规则；
+- 宿主机已有 UFW/firewalld 转发策略不会在 `DOCKER-USER` 之前额外丢弃 VPN 转发流量。
 
 ### 登录后立刻返回登录页
 

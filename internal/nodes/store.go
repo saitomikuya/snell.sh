@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
+	"regexp"
 	"strconv"
 
 	"github.com/google/uuid"
@@ -121,7 +123,7 @@ func (s *Store) migrateDefaultSnellListen(ctx context.Context) error {
 	case err != nil:
 		return err
 	case host == "127.0.0.1":
-		if conflictErr := s.checkConflict(ctx, "snell-main", "snell", "0.0.0.0", 6160, ""); conflictErr != nil {
+		if conflictErr := s.checkConflict(ctx, "snell-main", "snell", "0.0.0.0", 6160, Config{}); conflictErr != nil {
 			// A user may already be using the public port. Preserve that
 			// configuration and retry the migration on a later startup.
 			return nil
@@ -145,18 +147,36 @@ func (s *Store) migrateDefaultSnellListen(ctx context.Context) error {
 func (s *Store) Create(ctx context.Context, req CreateRequest, source string) (Node, error) {
 	return s.createWithID(ctx, uuid.NewString(), req, source)
 }
-func (s *Store) createWithID(ctx context.Context, id string, req CreateRequest, source string) (Node, error) {
-	if req.ListenHost == "" {
-		req.ListenHost = DefaultListenHost
+
+// CreateWithID is used by portable configuration imports. Keeping the source
+// ID when possible makes independently deployed panels converge on the same
+// node IDs and keeps ShadowTLS backend references stable.
+func (s *Store) CreateWithID(ctx context.Context, id string, req CreateRequest, source string) (Node, error) {
+	if !nodeIDPattern.MatchString(id) {
+		return Node{}, errors.New("节点 ID 格式无效")
 	}
+	return s.createWithID(ctx, id, req, source)
+}
+
+func (s *Store) FindByNameType(ctx context.Context, kind, name string) (Node, error) {
+	return scanNode(s.db.QueryRowContext(ctx, queryNode+` WHERE n.type=? AND n.name=? ORDER BY n.created_at LIMIT 1`, kind, name))
+}
+
+var nodeIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+func (s *Store) createWithID(ctx context.Context, id string, req CreateRequest, source string) (Node, error) {
+	Normalize(&req)
 	if err := Validate(req); err != nil {
 		return Node{}, err
 	}
-	if req.Secret == "" {
+	if req.Type == "anyconnect" {
+		payload, _ := json.Marshal(AnyConnectSecrets{CertificatePassword: req.CertificatePassword, PrivateKeyPassphrase: req.PrivateKeyPassphrase})
+		req.Secret = string(payload)
+	} else if req.Secret == "" {
 		raw, _ := secretstore.Random(24)
 		req.Secret = base64.RawURLEncoding.EncodeToString(raw)
 	}
-	if err := s.checkConflict(ctx, "", req.Type, req.ListenHost, req.ListenPort, req.Config.Mode); err != nil {
+	if err := s.checkConflict(ctx, "", req.Type, req.ListenHost, req.ListenPort, req.Config); err != nil {
 		return Node{}, err
 	}
 	if req.Type == "shadowtls" {
@@ -236,11 +256,12 @@ func (s *Store) Update(ctx context.Context, id string, req UpdateRequest, source
 	if err != nil {
 		return Node{}, err
 	}
-	create := CreateRequest{Type: old.Type, Name: req.Name, RuntimeVersion: req.RuntimeVersion, ListenHost: req.ListenHost, ListenPort: req.ListenPort, BackendNodeID: req.BackendNodeID, Config: req.Config, Secret: req.Secret}
+	NormalizeUpdate(old.Type, &req)
+	create := CreateRequest{Type: old.Type, Name: req.Name, RuntimeVersion: req.RuntimeVersion, ListenHost: req.ListenHost, ListenPort: req.ListenPort, BackendNodeID: req.BackendNodeID, Config: req.Config, Secret: req.Secret, CertificatePassword: req.CertificatePassword, PrivateKeyPassphrase: req.PrivateKeyPassphrase}
 	if err = Validate(create); err != nil {
 		return Node{}, err
 	}
-	if err = s.checkConflict(ctx, id, old.Type, req.ListenHost, req.ListenPort, req.Config.Mode); err != nil {
+	if err = s.checkConflict(ctx, id, old.Type, req.ListenHost, req.ListenPort, req.Config); err != nil {
 		return Node{}, err
 	}
 	if old.Type == "shadowtls" {
@@ -253,7 +274,23 @@ func (s *Store) Update(ctx context.Context, id string, req UpdateRequest, source
 	if err = s.db.QueryRowContext(ctx, `SELECT revision,secret_ref FROM node_configs WHERE node_id=?`, id).Scan(&revision, &secretRef); err != nil {
 		return Node{}, err
 	}
-	if req.Secret != "" {
+	if old.Type == "anyconnect" && (req.CertificatePassword != "" || req.PrivateKeyPassphrase != "") {
+		values, valuesErr := s.AnyConnectSecrets(ctx, id)
+		if valuesErr != nil {
+			return Node{}, valuesErr
+		}
+		if req.CertificatePassword != "" {
+			values.CertificatePassword = req.CertificatePassword
+		}
+		if req.PrivateKeyPassphrase != "" {
+			values.PrivateKeyPassphrase = req.PrivateKeyPassphrase
+		}
+		payload, _ := json.Marshal(values)
+		secretRef, err = s.secrets.Put(ctx, old.Type, payload)
+		if err != nil {
+			return Node{}, err
+		}
+	} else if req.Secret != "" {
 		secretRef, err = s.secrets.Put(ctx, old.Type, []byte(req.Secret))
 		if err != nil {
 			return Node{}, err
@@ -321,12 +358,12 @@ func (s *Store) checkBackend(ctx context.Context, id string) error {
 	if err := s.db.QueryRowContext(ctx, `SELECT type FROM nodes WHERE id=?`, id).Scan(&kind); err != nil {
 		return errors.New("后端节点不存在")
 	}
-	if kind == "shadowtls" {
-		return errors.New("ShadowTLS 不能作为后端")
+	if kind != "snell" && kind != "ss2022" {
+		return errors.New("只有 Snell 或 SS-2022 节点可以作为 ShadowTLS 后端")
 	}
 	return nil
 }
-func (s *Store) checkConflict(ctx context.Context, exclude, newType, host string, port int, mode string) error {
+func (s *Store) checkConflict(ctx context.Context, exclude, newType, host string, port int, newConfig Config) error {
 	rows, err := s.db.QueryContext(ctx, `SELECT n.id,n.type,n.listen_host,c.config_json FROM nodes n JOIN node_configs c ON c.node_id=n.id WHERE n.listen_port=? AND n.id<>?`, port, exclude)
 	if err != nil {
 		return err
@@ -340,16 +377,48 @@ func (s *Store) checkConflict(ctx context.Context, exclude, newType, host string
 		var cfg Config
 		_ = json.Unmarshal([]byte(raw), &cfg)
 		if host == "0.0.0.0" || host == "::" || otherHost == "0.0.0.0" || otherHost == "::" || host == otherHost {
-			if protocolOverlap(kind, cfg.Mode, newType, mode) {
+			if protocolOverlap(kind, cfg, newType, newConfig) {
 				return fmt.Errorf("端口 %d 与节点 %s 冲突", port, id)
 			}
 		}
 	}
-	return rows.Err()
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	if newType != "anyconnect" {
+		return nil
+	}
+	newPool, err := netip.ParsePrefix(newConfig.VPNNetwork)
+	if err != nil {
+		return err
+	}
+	poolRows, err := s.db.QueryContext(ctx, `SELECT n.id,c.config_json FROM nodes n JOIN node_configs c ON c.node_id=n.id WHERE n.type='anyconnect' AND n.id<>?`, exclude)
+	if err != nil {
+		return err
+	}
+	defer poolRows.Close()
+	for poolRows.Next() {
+		var id, raw string
+		if err = poolRows.Scan(&id, &raw); err != nil {
+			return err
+		}
+		var cfg Config
+		if json.Unmarshal([]byte(raw), &cfg) != nil {
+			continue
+		}
+		existing, parseErr := netip.ParsePrefix(cfg.VPNNetwork)
+		if parseErr == nil && (existing.Contains(newPool.Addr()) || newPool.Contains(existing.Addr())) {
+			return fmt.Errorf("VPN 地址池 %s 与 AnyConnect 节点 %s 重叠", newConfig.VPNNetwork, id)
+		}
+	}
+	return poolRows.Err()
 }
-func protocolOverlap(existingType, existingMode, newType, newMode string) bool {
-	existing := protocols(existingType, existingMode)
-	incoming := protocols(newType, newMode)
+func protocolOverlap(existingType string, existingConfig Config, newType string, newConfig Config) bool {
+	existing := protocols(existingType, existingConfig)
+	incoming := protocols(newType, newConfig)
 	for _, left := range existing {
 		for _, right := range incoming {
 			if left == right {
@@ -359,11 +428,17 @@ func protocolOverlap(existingType, existingMode, newType, newMode string) bool {
 	}
 	return false
 }
-func protocols(kind, mode string) []string {
+func protocols(kind string, config Config) []string {
+	if kind == "anyconnect" {
+		if config.UDPEnabled {
+			return []string{"tcp", "udp"}
+		}
+		return []string{"tcp"}
+	}
 	if kind != "ss2022" {
 		return []string{"tcp"}
 	}
-	switch mode {
+	switch config.Mode {
 	case "tcp_only":
 		return []string{"tcp"}
 	case "udp_only":
@@ -385,6 +460,9 @@ func scanNode(row scanner) (Node, error) {
 	}
 	if err := json.Unmarshal([]byte(cfg), &n.Config); err != nil {
 		return Node{}, err
+	}
+	if n.Type == "anyconnect" {
+		normalizeAnyConnectRouting(&n.Config)
 	}
 	return n, nil
 }

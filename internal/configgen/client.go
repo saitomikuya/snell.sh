@@ -27,6 +27,8 @@ type ClientConfigs struct {
 	QRCodeLabel           string `json:"qrCodeLabel,omitempty"`
 	ProtocolLabel         string `json:"protocolLabel"`
 	ImportNote            string `json:"importNote,omitempty"`
+	OpenConnect           string `json:"openConnect,omitempty"`
+	OpenConnectLabel      string `json:"openConnectLabel,omitempty"`
 	Warning               string `json:"warning,omitempty"`
 	Masked                bool   `json:"masked"`
 }
@@ -39,6 +41,19 @@ func Client(node nodes.Node, secret, publicHost string, backend *nodes.Node, bac
 	address := net.JoinHostPort(host, fmt.Sprint(node.ListenPort))
 	var out ClientConfigs
 	switch node.Type {
+	case "anyconnect":
+		address = net.JoinHostPort(node.Config.ServerName, fmt.Sprint(node.ListenPort))
+		if node.ListenPort == 443 {
+			address = node.Config.ServerName
+		}
+		endpoint := "https://" + address
+		out.ProtocolLabel = "AnyConnect / OpenConnect"
+		out.PrimaryLabel = "Cisco Secure Client 服务器地址"
+		out.Primary = endpoint
+		out.OpenConnectLabel = "OpenConnect 命令"
+		out.OpenConnect = "sudo openconnect --protocol=anyconnect --user USERNAME " + endpoint
+		out.Clash = "# AnyConnect 不是 Clash/Mihomo 代理节点；请使用 Cisco Secure Client 或 OpenConnect。"
+		out.ImportNote = "用户名由面板管理员创建。固定路由组用户会自动使用全隧道或中国直连；“登录时选择”用户可在连接时选择路由组。"
 	case "snell":
 		version := strings.TrimPrefix(node.Config.Version, "v")
 		recommended, alternative := surgeSnellVersions(version)

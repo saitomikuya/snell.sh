@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/proxy-panel/proxy-panel/internal/anyconnect"
 	"github.com/proxy-panel/proxy-panel/internal/configgen"
 	"github.com/proxy-panel/proxy-panel/internal/firewall"
 	"github.com/proxy-panel/proxy-panel/internal/nodes"
@@ -51,6 +52,7 @@ type Manager struct {
 	nodes      *nodes.Store
 	traffic    *traffic.Store
 	settings   *settings.Store
+	anyconnect *anyconnect.Service
 	processes  map[string]*process
 	closed     bool
 	logLimit   atomic.Int64
@@ -59,6 +61,9 @@ type Manager struct {
 
 func NewManager(dataDir string, store *nodes.Store, trafficStores ...*traffic.Store) *Manager {
 	manager := &Manager{dataDir: dataDir, nodes: store, processes: map[string]*process{}}
+	if store != nil {
+		manager.anyconnect = anyconnect.New(dataDir, store)
+	}
 	manager.logLimit.Store(settings.DefaultLogMaxMB << 20)
 	manager.logEnabled.Store(true)
 	if len(trafficStores) > 0 {
@@ -79,6 +84,13 @@ func (m *Manager) Apply(nodeID string) (Result, error) {
 	node, err := m.nodes.Get(context.Background(), nodeID)
 	if err != nil {
 		return Result{}, err
+	}
+	if node.Type == "anyconnect" {
+		result, applyErr := m.applyAnyConnect(node)
+		if applyErr != nil {
+			_ = m.nodes.UpdateRuntime(context.Background(), nodeID, "failed", 0, runtimelog.Redact(applyErr.Error()), 0)
+		}
+		return result, applyErr
 	}
 	secret, err := m.nodes.Secret(context.Background(), nodeID)
 	if err != nil {
@@ -133,6 +145,32 @@ func (m *Manager) Apply(nodeID string) (Result, error) {
 	return Result{OK: true, State: "stopped", Message: "configuration applied"}, nil
 }
 
+func (m *Manager) applyAnyConnect(node nodes.Node) (Result, error) {
+	if m.anyconnect == nil {
+		return Result{}, errors.New("AnyConnect service is unavailable")
+	}
+	configPath, err := m.anyconnect.PrepareConfig(context.Background(), node)
+	if err != nil {
+		return Result{}, err
+	}
+	if err = m.validateAnyConnectConfig(node, configPath); err != nil {
+		_ = m.anyconnect.RollbackConfig(node.ID)
+		return Result{}, err
+	}
+	if node.DesiredState != "running" {
+		_ = m.nodes.UpdateRuntime(context.Background(), node.ID, "stopped", 0, "", 0)
+		return Result{OK: true, State: "stopped", Message: "configuration applied"}, nil
+	}
+	result, err := m.Restart(node.ID)
+	if err == nil {
+		return result, nil
+	}
+	if rollbackErr := m.anyconnect.RollbackConfig(node.ID); rollbackErr == nil {
+		_, _ = m.Restart(node.ID)
+	}
+	return Result{}, fmt.Errorf("apply failed and rolled back: %w", err)
+}
+
 func (m *Manager) Start(id string) (Result, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -158,6 +196,9 @@ func (m *Manager) startLockedWithRestarts(id string, restarts int) (Result, erro
 		}
 	}
 	configPath := filepath.Join(m.dataDir, "config", configDir(node.Type), node.ID+configgen.Extension(node.Type))
+	if node.Type == "anyconnect" {
+		configPath = filepath.Join(m.dataDir, "config", "anyconnect", node.ID, "ocserv.conf")
+	}
 	if _, err = os.Stat(configPath); err != nil {
 		return Result{}, fmt.Errorf("configuration missing; apply it first")
 	}
@@ -176,6 +217,10 @@ func (m *Manager) startLockedWithRestarts(id string, restarts int) (Result, erro
 	cmd := exec.CommandContext(ctx, binary, args...)
 	if node.Type == "shadowtls" {
 		cmd.Env = append(os.Environ(), "MONOIO_FORCE_LEGACY_DRIVER=1", "RUST_LOG=warn")
+	} else if node.Type == "anyconnect" {
+		// user-profile is intentionally a basename so ocserv advertises a valid
+		// /profiles/profile.xml URI. Resolve it from the isolated runtime dir.
+		cmd.Dir = m.anyconnect.RuntimeDir(node.ID)
 	}
 	cmd.SysProcAttr = childProcessAttributes()
 	stdout, err := cmd.StdoutPipe()
@@ -189,9 +234,26 @@ func (m *Manager) startLockedWithRestarts(id string, restarts int) (Result, erro
 		return Result{}, err
 	}
 	logPath := filepath.Join(m.dataDir, "logs", node.ID+".log")
+	if node.Type == "anyconnect" {
+		if err = m.prepareAnyConnectNetwork(node); err != nil {
+			cancel()
+			_ = m.nodes.UpdateRuntime(context.Background(), id, "failed", 0, err.Error(), restarts)
+			return Result{}, err
+		}
+	}
 	if err = cmd.Start(); err != nil {
 		cancel()
+		if node.Type == "anyconnect" {
+			_ = firewall.RemoveVPN(node.ID)
+		}
 		return Result{}, err
+	}
+	if node.Type == "anyconnect" {
+		// ocserv creates the sec-mod socket after startup. Some builds create it
+		// with execute-only mode (0111), which prevents the isolated worker from
+		// authenticating even when the socket owner is nobody. Repair the mode
+		// before accepting client sessions; the socket is recreated on every start.
+		m.repairAnyConnectSocketPermissions(node.ID)
 	}
 	p := &process{cmd: cmd, cancel: cancel, started: time.Now(), restarts: restarts, state: "running"}
 	m.processes[id] = p
@@ -203,11 +265,35 @@ func (m *Manager) startLockedWithRestarts(id string, restarts int) (Result, erro
 	return Result{OK: true, State: "running", PID: cmd.Process.Pid}, nil
 }
 
+func (m *Manager) repairAnyConnectSocketPermissions(nodeID string) {
+	pattern := filepath.Join(m.anyconnect.RuntimeDir(nodeID), "ocserv.socket.*")
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		matches, _ := filepath.Glob(pattern)
+		if len(matches) > 0 {
+			for _, path := range matches {
+				// With isolate-workers enabled, the worker may run under a UID
+				// different from the sec-mod owner. The socket is protected by
+				// the private runtime directory, so allow the worker to connect.
+				_ = os.Chmod(path, 0666)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func (m *Manager) Stop(id string) (Result, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p := m.processes[id]
 	if p == nil || p.cmd == nil || p.exited {
+		if node, err := m.nodes.Get(context.Background(), id); err == nil && node.Type == "anyconnect" {
+			_ = firewall.RemoveVPN(id)
+		}
 		_ = m.nodes.UpdateRuntime(context.Background(), id, "stopped", 0, "", 0)
 		return Result{OK: true, State: "stopped"}, nil
 	}
@@ -259,6 +345,9 @@ func (m *Manager) wait(id string, p *process) {
 	p.lastError = message
 	p.state = "stopped"
 	_ = m.nodes.UpdateRuntime(context.Background(), id, "stopped", 0, message, p.restarts)
+	if node, nodeErr := m.nodes.Get(context.Background(), id); nodeErr == nil && node.Type == "anyconnect" {
+		_ = firewall.RemoveVPN(id)
+	}
 	logPath := filepath.Join(m.dataDir, "logs", id+".log")
 	if message == "" {
 		m.appendLog(logPath, "[运行状态] 节点进程已停止")
@@ -362,7 +451,7 @@ func (m *Manager) Shutdown() {
 	m.closed = true
 	m.mu.Unlock()
 	list, _ := m.nodes.List(context.Background())
-	for _, kind := range []string{"shadowtls", "snell", "ss2022"} {
+	for _, kind := range []string{"shadowtls", "anyconnect", "snell", "ss2022"} {
 		for _, node := range list {
 			if node.Type == kind {
 				_, _ = m.Stop(node.ID)
@@ -375,7 +464,7 @@ func (m *Manager) Reconcile() {
 	if err != nil {
 		return
 	}
-	for _, kind := range []string{"snell", "ss2022", "shadowtls"} {
+	for _, kind := range []string{"snell", "ss2022", "anyconnect", "shadowtls"} {
 		for _, node := range list {
 			if node.Type == kind && node.DesiredState == "running" {
 				m.mu.Lock()
@@ -392,12 +481,73 @@ func (m *Manager) Reconcile() {
 	}
 }
 
+// SampleAnyConnectTraffic reconciles ocserv's per-account counters with
+// durable monthly totals. The command is best-effort when a node is offline;
+// the last stored values remain visible in the panel until the next sample.
+func (m *Manager) SampleAnyConnectTraffic() error {
+	if m.traffic == nil || m.anyconnect == nil || m.nodes == nil {
+		return nil
+	}
+	list, err := m.nodes.List(context.Background())
+	if err != nil {
+		return err
+	}
+	var problems []error
+	for _, node := range list {
+		if node.Type != "anyconnect" || node.DesiredState != "running" {
+			continue
+		}
+		users, usersErr := m.nodes.ListAnyConnectUsers(context.Background(), node.ID)
+		if usersErr != nil {
+			problems = append(problems, fmt.Errorf("%s users: %w", node.Name, usersErr))
+			continue
+		}
+		byName := make(map[string]nodes.AnyConnectUser, len(users))
+		for _, user := range users {
+			byName[user.Username] = user
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		samples, sampleErr := m.anyconnect.ListUserTraffic(ctx, node)
+		cancel()
+		if sampleErr != nil {
+			// ocserv may be starting or its control socket may not exist yet.
+			// This should not make node-wide accounting fail.
+			continue
+		}
+		for _, sample := range samples {
+			user, ok := byName[sample.Username]
+			if !ok {
+				continue
+			}
+			result, userErr := m.traffic.SampleUser(context.Background(), user.ID, sample.UploadBytes, sample.DownloadBytes, time.Now())
+			if userErr != nil {
+				problems = append(problems, fmt.Errorf("%s/%s: %w", node.Name, sample.Username, userErr))
+				continue
+			}
+			if result.Paused && result.QuotaBytes > 0 && result.TotalUpload+result.TotalDownload >= result.QuotaBytes {
+				// ocserv does not expose a per-user firewall hook. Terminating the
+				// active session prevents continued use after the quota is reached;
+				// the durable paused flag keeps the state visible in the panel.
+				ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+				if terminateErr := m.anyconnect.TerminateUser(ctx, node, sample.Username); terminateErr != nil {
+					problems = append(problems, terminateErr)
+				}
+				cancel()
+			}
+		}
+	}
+	return errors.Join(problems...)
+}
+
 // SampleTraffic reconciles per-port nftables counters with durable monthly
 // totals, enforces quotas, and records observable activity in each node log.
 func (m *Manager) SampleTraffic() error {
 	if m.traffic == nil {
 		return nil
 	}
+	// Account-level sampling is independent from nftables and should still run
+	// when a host has no firewall tooling available (for example during startup).
+	_ = m.SampleAnyConnectTraffic()
 	list, err := m.nodes.List(context.Background())
 	if err != nil {
 		return err
@@ -499,6 +649,12 @@ func (m *Manager) SetProjectBlocked(blocked bool) (Result, error) {
 }
 
 func (m *Manager) binaryPath(node nodes.Node) string {
+	if node.Type == "anyconnect" {
+		if configured := strings.TrimSpace(os.Getenv("OCSERV_BINARY")); configured != "" {
+			return configured
+		}
+		return "/usr/sbin/ocserv"
+	}
 	name := map[string]string{"snell": "snell-server", "ss2022": "ssserver", "shadowtls": "shadow-tls"}[node.Type]
 	return filepath.Join(m.dataDir, "runtime", runtimeDir(node.Type), node.RuntimeVersion, runtime.GOARCH, name)
 }
@@ -508,6 +664,8 @@ func (m *Manager) commandArgs(node nodes.Node, config string) ([]string, error) 
 		return []string{"-c", config}, nil
 	case "ss2022":
 		return []string{"-c", config}, nil
+	case "anyconnect":
+		return []string{"--foreground", "--log-stderr", "--config", config}, nil
 	default:
 		backend, err := m.nodes.Get(context.Background(), node.BackendNodeID)
 		if err != nil {
@@ -536,6 +694,71 @@ func (m *Manager) commandArgs(node nodes.Node, config string) ([]string, error) 
 			args = append(args, "--wildcard-sni", node.Config.WildcardSNI)
 		}
 		return args, nil
+	}
+}
+
+func (m *Manager) validateAnyConnectConfig(node nodes.Node, path string) error {
+	binary := m.binaryPath(node)
+	if _, err := os.Stat(binary); err != nil {
+		return fmt.Errorf("runtime missing: %s", binary)
+	}
+	command := exec.Command(binary, "--config", path, "--test-config")
+	command.Dir = m.anyconnect.RuntimeDir(node.ID)
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("ocserv configuration validation failed: %s", runtimelog.Redact(strings.TrimSpace(string(output))))
+	}
+	return nil
+}
+
+func (m *Manager) prepareAnyConnectNetwork(node nodes.Node) error {
+	if _, err := os.Stat("/dev/net/tun"); err != nil {
+		return errors.New("宿主机未向容器提供 /dev/net/tun")
+	}
+	forwarding, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward")
+	if err != nil || strings.TrimSpace(string(forwarding)) != "1" {
+		return errors.New("宿主机 IPv4 转发未启用；请在宿主机设置 net.ipv4.ip_forward=1")
+	}
+	if err = firewall.EnsureVPN(node.ID, node.Config.VPNNetwork); err != nil {
+		return fmt.Errorf("配置 AnyConnect 专属 nftables 规则: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) RefreshAnyConnectAsset(nodeID, kind string) (AssetRefreshResult, error) {
+	node, err := m.nodes.Get(context.Background(), nodeID)
+	if err != nil {
+		return AssetRefreshResult{}, err
+	}
+	var value anyconnect.AssetResult
+	switch kind {
+	case "certificate":
+		value, err = m.anyconnect.RefreshCertificates(context.Background(), node)
+	case "cidr":
+		value, err = m.anyconnect.RefreshCIDRs(context.Background(), node)
+	default:
+		return AssetRefreshResult{}, errors.New("asset kind must be certificate or cidr")
+	}
+	if err != nil {
+		return AssetRefreshResult{}, err
+	}
+	result := AssetRefreshResult{OK: value.OK, Changed: value.Changed, Kind: value.Kind, Fingerprint: value.Fingerprint, Count: value.Count, UpdatedAt: value.UpdatedAt, Message: value.Message}
+	return result, nil
+}
+
+func (m *Manager) RemoveAnyConnect(nodeID string) error {
+	_ = firewall.RemoveVPN(nodeID)
+	if m.anyconnect == nil {
+		return nil
+	}
+	return m.anyconnect.Remove(nodeID)
+}
+
+func (m *Manager) RefreshDueAnyConnectAssets() {
+	if m.anyconnect == nil {
+		return
+	}
+	for _, nodeID := range m.anyconnect.RefreshDue(context.Background()) {
+		_, _ = m.Apply(nodeID)
 	}
 }
 func (m *Manager) validateCandidate(node nodes.Node, path string) error {
@@ -641,6 +864,12 @@ func isPublicListener(host string) bool {
 }
 
 func nodeNetworks(node nodes.Node) []string {
+	if node.Type == "anyconnect" {
+		if node.Config.UDPEnabled {
+			return []string{"tcp", "udp"}
+		}
+		return []string{"tcp"}
+	}
 	if node.Type != "ss2022" {
 		return []string{"tcp"}
 	}

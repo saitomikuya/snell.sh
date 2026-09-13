@@ -7,6 +7,11 @@ services:
     cap_add:
       - NET_ADMIN
       - NET_RAW
+    # Allow the entrypoint to create /dev/net/tun when minimal hosts (such as
+    # Alpine) do not create the device node before Docker starts the container.
+    # The host kernel must still have the TUN module loaded.
+    device_cgroup_rules:
+      - 'c 10:200 rwm'
     volumes:
       - /opt/proxy-panel:/data
     environment:
@@ -14,6 +19,7 @@ services:
       PANEL_PORT: ${PANEL_PORT:-8080}
       PANEL_SECURE_COOKIE: ${PANEL_SECURE_COOKIE:-0}
       PANEL_AUTO_INSTALL_RUNTIMES: ${PANEL_AUTO_INSTALL_RUNTIMES:-1}
+      PANEL_AUTO_CREATE_TUN: ${PANEL_AUTO_CREATE_TUN:-1}
       TZ: ${TZ:-Asia/Shanghai}
     healthcheck:
       test: ["CMD", "/usr/local/bin/panel", "healthcheck"]
