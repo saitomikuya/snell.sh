@@ -146,6 +146,9 @@ func maintain(ctx context.Context, store *database.Store) {
 	}
 }
 func runAgent() error {
+	if err := agent.PrepareRuntimeLimits(); err != nil {
+		return err
+	}
 	cfg, store, _, nodeStore, err := prepare()
 	if err != nil {
 		return err

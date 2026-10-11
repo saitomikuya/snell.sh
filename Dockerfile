@@ -1,8 +1,7 @@
 # syntax=docker/dockerfile:1.7
-# Colima runs natively on arm64; keeping the toolchain stages on the native
-# platform avoids Go crashes under amd64 emulation while still cross-compiling
-# the final binary for TARGETOS/TARGETARCH.
-ARG BUILDPLATFORM=linux/arm64
+# Keep toolchains on the builder's native platform, on both amd64 CI runners
+# and arm64 workstations, while cross-compiling for TARGETOS/TARGETARCH.
+ARG BUILDPLATFORM
 FROM --platform=$BUILDPLATFORM node:24.7.0-bookworm-slim AS web-build
 WORKDIR /src/web
 RUN corepack enable

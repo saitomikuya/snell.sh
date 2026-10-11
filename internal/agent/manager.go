@@ -771,12 +771,6 @@ func (m *Manager) validateCandidate(node nodes.Node, path string) error {
 	}
 	return nil
 }
-func (m *Manager) capture(path, source string, reader io.Reader) {
-	scanner := bufio.NewScanner(reader)
-	for scanner.Scan() {
-		m.appendLog(path, "[运行时"+source+"] "+runtimelog.Redact(scanner.Text()))
-	}
-}
 func (m *Manager) appendLog(path, line string) {
 	if !m.logEnabled.Load() {
 		return
