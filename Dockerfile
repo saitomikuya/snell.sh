@@ -1,7 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # Keep toolchains on the builder's native platform, on both amd64 CI runners
 # and arm64 workstations, while cross-compiling for TARGETOS/TARGETARCH.
-ARG BUILDPLATFORM
 FROM --platform=$BUILDPLATFORM node:24.7.0-bookworm-slim AS web-build
 WORKDIR /src/web
 RUN corepack enable
